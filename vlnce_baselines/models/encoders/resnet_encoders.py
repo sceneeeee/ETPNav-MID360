@@ -255,7 +255,9 @@ class CLIPEncoder(nn.Module):
         self, device,
     ):
         super().__init__()
-        self.model, _ = clip.load("ViT-B/32", device=device)
+        self.model, _ = clip.load(
+            "ViT-B/32", device=device, download_root="data/pretrained/CLIP"
+        )
         for param in self.model.parameters():
             param.requires_grad_(False)
         self.model.eval()

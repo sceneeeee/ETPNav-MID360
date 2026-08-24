@@ -55,7 +55,10 @@ from ..utils import (
 
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=FutureWarning)
-    import tensorflow as tf  # noqa: F401
+    try:
+        import tensorflow as tf  # noqa: F401
+    except ImportError:
+        tf = None
 
 
 class BaseVLNCETrainer(BaseILTrainer):

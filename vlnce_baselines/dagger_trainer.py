@@ -28,7 +28,10 @@ from vlnce_baselines.common.utils import extract_instruction_tokens, get_camera_
 
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=FutureWarning)
-    import tensorflow as tf  # noqa: F401
+    try:
+        import tensorflow as tf  # noqa: F401
+    except ImportError:
+        tf = None
 
 import torch.distributed as distr
 import gzip
