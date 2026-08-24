@@ -21,7 +21,7 @@ the first requested MP3D scene and then stops because its `.glb` is absent.
 | Kernel | Linux 6.18 WSL2 |
 | CPU/RAM | 15 GiB RAM, 4 GiB swap |
 | GPU | NVIDIA GeForce RTX 4060 Ti, compute capability 8.9 |
-| GPU driver | WSL UMD 610.57.01; Windows/KMD 610.88 |
+| GPU driver | NVIDIA 610.88 under WSL |
 | Reported CUDA compatibility | 13.3 |
 | VRAM | 8,188 MiB (`torch`: 7.996 GiB) |
 | Disk at setup | 1,007 GiB total, 877 GiB free under `/home` |
@@ -97,12 +97,14 @@ WebDataset 0.1.40, `fastdtw` 0.3.4, `dtw` 1.4, `jsonlines` 3.0, `ifcfg` 0.22,
    scene incompatibility. The same official Habitat-Sim 0.1.7 source commit's
    display/GLX build was installed. It uses WSLg and passes real simulator setup.
 4. Three trainer modules imported unused TensorFlow unconditionally even though the
-   official setup instructs users to omit it. Those imports are now optional.
-5. Waypoint mode attempted spatial pooling on optional forward arguments that are
-   `None`. Pooling the already constructed panorama encoder tensors fixes this
-   released-code runtime defect without changing the model or algorithm.
-6. CLIP ViT-B/32 downloads and loads from ignored `data/pretrained/CLIP`, keeping
+   official setup instructs users to omit it. Those unused imports were removed.
+5. CLIP ViT-B/32 downloads and loads from ignored `data/pretrained/CLIP`, keeping
    model cache out of the user's home cache and inside the baseline asset boundary.
+
+During early smoke debugging, a temporary local edit pooled panorama tensors before
+the original clockwise-to-counter-clockwise restoration. Two-axis code review caught
+the semantic mismatch before handoff; the final code retains the official ordering
+and the post-restoration pooling exactly.
 
 ## Public model and dataset assets
 
@@ -154,14 +156,14 @@ they could access WSL's GPU and display devices.
 
 Measured synthetic inference timings on the RTX 4060 Ti:
 
-- Policy initialization: 8,797.59 ms.
-- Checkpoint load: 1,843.65 ms.
-- Waypoint inference: 64.52 ms cold, then 23.88 and 23.16 ms; mean 37.18 ms.
-- Graph planner: 3.65, 2.61, 2.43, 2.58, and 2.51 ms; mean 2.76 ms.
+- Policy initialization: 8,505.27 ms.
+- Checkpoint load: 1,852.33 ms.
+- Waypoint inference: 67.32 ms cold, then 24.64 and 26.84 ms; mean 39.60 ms.
+- Graph planner: 6.74, 6.46, 6.43, 5.93, and 5.66 ms; mean 6.25 ms.
 - Allocated GPU memory after model load: 975.15 MiB.
 - Peak allocated GPU memory through waypoint/planner: 1,016.30 MiB.
-- Process RSS after model load: 6,910 MiB; peak RSS: 8,378.78 MiB.
-- Public test-scene simulator initialization: 628.22 ms; one step: 1.44 ms.
+- Process RSS after model load: 7,196 MiB; peak RSS: 8,531.89 MiB.
+- Public test-scene simulator initialization: 803.94 ms; one step: 1.33 ms.
 
 The synthetic planner timing isolates a single forward pass. A real episode's
 average planner latency and total runtime cannot be measured until MP3D is mounted.

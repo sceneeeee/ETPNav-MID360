@@ -29,6 +29,7 @@ DEFAULT_CHECKPOINT = "data/logs/checkpoints/release_r2r/ckpt.iter12000.pth"
 DEFAULT_WAYPOINT = "data/wp_pred/check_cwp_bestdist_hfov90"
 DEFAULT_DDPPO = "data/ddppo-models/gibson-2plus-resnet50.pth"
 DEFAULT_CONFIG = "run_r2r/iter_train.yaml"
+PANORAMA_VIEW_COUNT = 12
 
 
 def elapsed_ms(start):
@@ -255,7 +256,11 @@ def load_policy(config, args, device, result):
 
 def panorama_observations(device):
     observations = OrderedDict()
-    headings = [""] + ["_{}".format(angle) for angle in range(30, 360, 30)]
+    heading_step = 360 // PANORAMA_VIEW_COUNT
+    headings = [
+        "" if angle == 0 else "_{}".format(angle)
+        for angle in range(0, 360, heading_step)
+    ]
     for suffix in headings:
         observations["rgb{}".format(suffix)] = torch.zeros(
             (1, 224, 224, 3), dtype=torch.uint8, device=device
@@ -300,7 +305,8 @@ def waypoint_smoke(policy, waypoint, device, args, result):
 
 def planner_smoke(policy, waypoint_output, device, args, result):
     candidate_indexes = waypoint_output["cand_img_idxes"][0]
-    candidate_mask = np.zeros(12, dtype=np.bool_)
+    panorama_view_count = waypoint_output["pano_rgb"].shape[1]
+    candidate_mask = np.zeros(panorama_view_count, dtype=np.bool_)
     candidate_mask[candidate_indexes] = True
 
     rgb_features = torch.cat(
@@ -326,11 +332,11 @@ def planner_smoke(policy, waypoint_output, device, args, result):
     ).unsqueeze(0).to(device)
     candidate_count = len(candidate_indexes)
     nav_types = torch.tensor(
-        [[1] * candidate_count + [0] * (12 - candidate_count)],
+        [[1] * candidate_count + [0] * (panorama_view_count - candidate_count)],
         dtype=torch.long,
         device=device,
     )
-    view_lens = torch.tensor([12], dtype=torch.long, device=device)
+    view_lens = torch.tensor([panorama_view_count], dtype=torch.long, device=device)
     text_ids = torch.tensor(
         [[101, 2023, 2003, 1037, 3231, 102]], dtype=torch.long, device=device
     )

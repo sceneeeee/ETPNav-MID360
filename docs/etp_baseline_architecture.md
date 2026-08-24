@@ -96,10 +96,9 @@ distances, RGB/depth embeddings, angle features, and source panorama indices are
 returned together.
 
 The model contains 17,614,200 parameters and loads
-`data/wp_pred/check_cwp_bestdist_hfov90`. A released-code defect attempted to pool
-optional `rgb_feats`/`depth_feats` arguments (both `None` in waypoint mode); the
-compatibility fix pools the already reshaped encoder outputs. It changes neither
-weights nor mathematical operations.
+`data/wp_pred/check_cwp_bestdist_hfov90`. Encoder outputs are restored from the
+clockwise predictor ordering to the counter-clockwise panorama ordering before
+pooling and candidate feature lookup; this original ordering is preserved.
 
 ## 5. Panorama encoder
 

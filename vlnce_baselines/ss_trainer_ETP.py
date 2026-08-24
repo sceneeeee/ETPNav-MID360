@@ -2,7 +2,6 @@ import gc
 import os
 import sys
 import random
-import warnings
 from collections import defaultdict
 from typing import Dict, List
 import jsonlines
@@ -44,13 +43,6 @@ from .utils import (
 from vlnce_baselines.common.utils import dis_to_con, gather_list_and_concat
 from habitat_extensions.measures import NDTW, StepsTaken
 from fastdtw import fastdtw
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    try:
-        import tensorflow as tf  # noqa: F401
-    except ImportError:
-        tf = None
 
 import torch.distributed as distr
 import gzip

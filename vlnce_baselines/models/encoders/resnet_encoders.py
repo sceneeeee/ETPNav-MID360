@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,6 +11,11 @@ from habitat_baselines.rl.ddppo.policy import resnet
 from habitat_baselines.rl.ddppo.policy.resnet_policy import ResNetEncoder
 import torchvision
 import clip
+
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..")
+)
 
 class VlnResnetDepthEncoder(nn.Module):
     def __init__(
@@ -256,7 +263,9 @@ class CLIPEncoder(nn.Module):
     ):
         super().__init__()
         self.model, _ = clip.load(
-            "ViT-B/32", device=device, download_root="data/pretrained/CLIP"
+            "ViT-B/32",
+            device=device,
+            download_root=os.path.join(PROJECT_ROOT, "data", "pretrained", "CLIP"),
         )
         for param in self.model.parameters():
             param.requires_grad_(False)

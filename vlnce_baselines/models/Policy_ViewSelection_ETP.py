@@ -286,10 +286,8 @@ class ETP(Net):
                 # batch_way_log_prob = None
                 None
             
-            # Pool the panorama-shaped encoder outputs.  The forward arguments
-            # named rgb_feats/depth_feats are optional and are None in waypoint mode.
-            rgb_feats = self.space_pool_rgb(rgb_embed_reshape)
-            depth_feats = self.space_pool_depth(depth_embed_reshape)
+            rgb_feats = self.space_pool_rgb(rgb_feats)
+            depth_feats = self.space_pool_depth(depth_feats)
 
             # for cand
             cand_rgb = []
