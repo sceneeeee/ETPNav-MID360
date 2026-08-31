@@ -222,3 +222,32 @@ and local `.external` dependencies. ModelScope's temporary LFS metadata/cache wa
 removed after asset validation; it is recoverable by re-fetching the public source.
 Smoke JSON files remain under ignored `data/logs/smoke/` and are deliberately not
 committed.
+
+## Public example-scene engineering update (2026-09-01)
+
+While the formal Matterport3D authorization request is pending, development used
+only Habitat's public `habitat_test_scenes` asset. Habitat-Sim 0.1.7 does not ship
+`habitat_sim.utils.datasets_download`; the existing official Van Gogh test scene
+was provenance-checked against Habitat's public download definition and CC BY 4.0
+README attribution.
+
+The 0.1.7 display package required Ubuntu GLVND libraries to be preloaded to avoid
+black sensor frames caused by mixed Conda/system OpenGL dispatch. With that launcher,
+the scene, navmesh, five navigable poses, valid RGB/metric depth, three discrete
+actions, and collision flags all passed. This is GPU-backed WSLg/GLX; legacy EGL
+remains unavailable under WSL.
+
+The waypoint implementation is now isolated behind `WaypointProvider` with the
+original ten-field planner contract. On a fixed real 12-view observation, the
+temporary pre-refactor path and `OriginalETPWaypointProvider` were bit-identical
+across every candidate and panorama output. A golden regression and eleven unit
+tests cover the contract, depth back-projection, coordinate rotation, filtering,
+inflation, the `120 x 12` score, and candidate selection.
+
+`MID360GeometryWaypointProvider` V0 was then run at five fixed scene poses. It keeps
+the original visual encoders/features and replaces only learned proposal generation.
+All poses emitted five candidates; panorama feature differences remained zero. Full
+provider means were 34.90 ms Original and 65.89 ms Geometry, with 1,016.34 MiB peak
+allocated CUDA memory. These are engineering timings, not R2R-CE metrics. Details
+are in `docs/example_scene_smoke_test.md` and
+`docs/mid360_example_scene_results.md`.

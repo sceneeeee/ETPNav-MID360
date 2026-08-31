@@ -254,7 +254,28 @@ def load_policy(config, args, device, result):
     return policy, waypoint
 
 
-def panorama_observations(device):
+def panorama_observations(device, observation_npz=None):
+    if observation_npz:
+        loaded = np.load(observation_npz)
+        observations = OrderedDict()
+        for angle in range(0, 360, 360 // PANORAMA_VIEW_COUNT):
+            suffix = "" if angle == 0 else "_{}".format(angle)
+            for kind in ("rgb", "depth"):
+                key = "{}{}".format(kind, suffix)
+                if key not in loaded:
+                    raise RuntimeError(
+                        "12-view observation is missing key: {}".format(key)
+                    )
+                array = np.ascontiguousarray(loaded[key])
+                observations[key] = torch.from_numpy(array).unsqueeze(0).to(device)
+        if observations["rgb"].shape != (1, 224, 224, 3):
+            raise RuntimeError("unexpected RGB shape: {}".format(observations["rgb"].shape))
+        if observations["depth"].shape != (1, 256, 256, 1):
+            raise RuntimeError(
+                "unexpected depth shape: {}".format(observations["depth"].shape)
+            )
+        return observations
+
     observations = OrderedDict()
     heading_step = 360 // PANORAMA_VIEW_COUNT
     headings = [
@@ -277,7 +298,7 @@ def synchronize(device):
 
 
 def waypoint_smoke(policy, waypoint, device, args, result):
-    observations = panorama_observations(device)
+    observations = panorama_observations(device, args.observation_npz)
     timings = []
     output = None
     with torch.no_grad():
@@ -299,6 +320,13 @@ def waypoint_smoke(policy, waypoint, device, args, result):
         "candidate_count": len(output["cand_angles"][0]),
         "candidate_angles": output["cand_angles"][0],
         "candidate_distances": output["cand_distances"][0],
+        "candidate_img_idxes": output["cand_img_idxes"][0].tolist(),
+        "candidate_rgb_shape": list(output["cand_rgb"][0].shape),
+        "candidate_depth_shape": list(output["cand_depth"][0].shape),
+        "candidate_angle_feature_shape": list(output["cand_angle_fts"][0].shape),
+        "panorama_rgb_shape": list(output["pano_rgb"].shape),
+        "panorama_depth_shape": list(output["pano_depth"].shape),
+        "observation_source": args.observation_npz or "synthetic_zeros",
     }
     return output
 
@@ -409,6 +437,7 @@ def parse_args():
     parser.add_argument("--ddppo-checkpoint", default=DEFAULT_DDPPO)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--scene")
+    parser.add_argument("--observation-npz")
     parser.add_argument("--policy", action="store_true")
     parser.add_argument("--waypoint", action="store_true")
     parser.add_argument("--planner", action="store_true")

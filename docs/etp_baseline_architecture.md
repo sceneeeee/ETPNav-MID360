@@ -100,6 +100,14 @@ The model contains 17,614,200 parameters and loads
 clockwise predictor ordering to the counter-clockwise panorama ordering before
 pooling and candidate feature lookup; this original ordering is preserved.
 
+The implementation is now owned by
+`vlnce_baselines/waypoint_provider/original_etp.py`. `ETP.forward(mode='waypoint')`
+delegates through the narrow `WaypointProvider.predict(observations, in_train)`
+seam and returns the unchanged ten-field mapping. The alternate
+`MID360GeometryWaypointProvider` uses the same panorama encoding and candidate
+feature construction, replacing only heatmap proposal. No provider mutates
+GraphMap or calls the graph planner.
+
 ## 5. Panorama encoder
 
 **ETP-core.** Candidate views are placed first and tagged as navigable; remaining

@@ -1,9 +1,6 @@
-from copy import deepcopy
 import numpy as np
-import time
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from gym import Space
 from habitat import Config
@@ -25,10 +22,10 @@ from vlnce_baselines.models.encoders.resnet_encoders import (
 )
 from vlnce_baselines.models.policy import ILPolicy
 
-from vlnce_baselines.waypoint_pred.TRM_net import BinaryDistPredictor_TRM
-from vlnce_baselines.waypoint_pred.utils import nms
-from vlnce_baselines.models.utils import (
-    angle_feature_with_ele, dir_angle_feature_with_ele, angle_feature_torch, length2mask)
+from vlnce_baselines.models.utils import angle_feature_torch
+from vlnce_baselines.waypoint_provider.original_etp import (
+    OriginalETPWaypointProvider,
+)
 import math
 
 @baseline_registry.register_policy
@@ -156,7 +153,8 @@ class ETP(Net):
 
     def forward(self, mode=None, 
                 txt_ids=None, txt_masks=None, txt_embeds=None, 
-                waypoint_predictor=None, observations=None, in_train=True,
+                waypoint_predictor=None, waypoint_provider=None,
+                observations=None, in_train=True,
                 rgb_fts=None, dep_fts=None, loc_fts=None, 
                 nav_types=None, view_lens=None,
                 gmap_vp_ids=None, gmap_step_ids=None,
@@ -170,176 +168,18 @@ class ETP(Net):
             return encoded_sentence
 
         elif mode == 'waypoint':
-            # batch_size = observations['instruction'].size(0)
-            batch_size = observations['rgb'].shape[0]
-            ''' encoding rgb/depth at all directions ----------------------------- '''
-            NUM_ANGLES = 120    # 120 angles 3 degrees each
-            NUM_IMGS = 12
-            NUM_CLASSES = 12    # 12 distances at each sector
-            depth_batch = torch.zeros_like(observations['depth']).repeat(NUM_IMGS, 1, 1, 1)
-            rgb_batch = torch.zeros_like(observations['rgb']).repeat(NUM_IMGS, 1, 1, 1)
-
-            # reverse the order of input images to clockwise
-            a_count = 0
-            for i, (k, v) in enumerate(observations.items()):
-                if 'depth' in k:  # You might need to double check the keys order
-                    for bi in range(v.size(0)):
-                        ra_count = (NUM_IMGS - a_count) % NUM_IMGS
-                        depth_batch[ra_count + bi*NUM_IMGS] = v[bi]
-                        rgb_batch[ra_count + bi*NUM_IMGS] = observations[k.replace('depth','rgb')][bi]
-                    a_count += 1
-            obs_view12 = {}
-            obs_view12['depth'] = depth_batch
-            obs_view12['rgb'] = rgb_batch
-            depth_embedding = self.depth_encoder(obs_view12)  # torch.Size([bs, 128, 4, 4])
-            rgb_embedding = self.rgb_encoder(obs_view12)      # torch.Size([bs, 2048, 7, 7])
-
-            ''' waypoint prediction ----------------------------- '''
-            waypoint_heatmap_logits = waypoint_predictor(
-                rgb_embedding, depth_embedding)
-
-            # reverse the order of images back to counter-clockwise
-            rgb_embed_reshape = rgb_embedding.reshape(
-                batch_size, NUM_IMGS, 512, 1, 1)
-            depth_embed_reshape = depth_embedding.reshape(
-                batch_size, NUM_IMGS, 128, 4, 4)
-            rgb_feats = torch.cat((
-                rgb_embed_reshape[:,0:1,:], 
-                torch.flip(rgb_embed_reshape[:,1:,:], [1]),
-            ), dim=1)
-            depth_feats = torch.cat((
-                depth_embed_reshape[:,0:1,:], 
-                torch.flip(depth_embed_reshape[:,1:,:], [1]),
-            ), dim=1)
-            # way_feats = torch.cat((
-            #     way_feats[:,0:1,:], 
-            #     torch.flip(way_feats[:,1:,:], [1]),
-            # ), dim=1)
-
-            # from heatmap to points
-            batch_x_norm = torch.softmax(
-                waypoint_heatmap_logits.reshape(
-                    batch_size, NUM_ANGLES*NUM_CLASSES,
-                ), dim=1
-            )
-            batch_x_norm = batch_x_norm.reshape(
-                batch_size, NUM_ANGLES, NUM_CLASSES,
-            )
-            batch_x_norm_wrap = torch.cat((
-                batch_x_norm[:,-1:,:], 
-                batch_x_norm, 
-                batch_x_norm[:,:1,:]), 
-                dim=1)
-            batch_output_map = nms(
-                batch_x_norm_wrap.unsqueeze(1), 
-                max_predictions=5,
-                sigma=(7.0,5.0))
-
-            # predicted waypoints before sampling
-            batch_output_map = batch_output_map.squeeze(1)[:,1:-1,:]
-
-            # candidate_lengths = ((batch_output_map!=0).sum(-1).sum(-1) + 1).tolist()
-            # if isinstance(candidate_lengths, int):
-            #     candidate_lengths = [candidate_lengths]
-            # max_candidate = max(candidate_lengths)  # including stop
-            # cand_mask = length2mask(candidate_lengths, device=self.device)
-
-            if in_train:
-                # Waypoint augmentation
-                # parts of heatmap for sampling (fix offset first)
-                HEATMAP_OFFSET = 5
-                batch_way_heats_regional = torch.cat(
-                    (waypoint_heatmap_logits[:,-HEATMAP_OFFSET:,:], 
-                    waypoint_heatmap_logits[:,:-HEATMAP_OFFSET,:],
-                ), dim=1)
-                batch_way_heats_regional = batch_way_heats_regional.reshape(batch_size, 12, 10, 12)
-                batch_sample_angle_idxes = []
-                batch_sample_distance_idxes = []
-                # batch_way_log_prob = []
-                for j in range(batch_size):
-                    # angle indexes with candidates
-                    angle_idxes = batch_output_map[j].nonzero()[:, 0]
-                    # clockwise image indexes (same as batch_x_norm)
-                    img_idxes = ((angle_idxes.cpu().numpy()+5) // 10)
-                    img_idxes[img_idxes==12] = 0
-                    # # candidate waypoint states
-                    # way_feats_regional = way_feats[j][img_idxes]
-                    # heatmap regions for sampling
-                    way_heats_regional = batch_way_heats_regional[j][img_idxes].view(img_idxes.size, -1)
-                    way_heats_probs = F.softmax(way_heats_regional, 1)
-                    probs_c = torch.distributions.Categorical(way_heats_probs)
-                    way_heats_act = probs_c.sample().detach()
-                    sample_angle_idxes = []
-                    sample_distance_idxes = []
-                    for k, way_act in enumerate(way_heats_act):
-                        if img_idxes[k] != 0:
-                            angle_pointer = (img_idxes[k] - 1) * 10 + 5
-                        else:
-                            angle_pointer = 0
-                        sample_angle_idxes.append(way_act//12+angle_pointer)
-                        sample_distance_idxes.append(way_act%12)
-                    batch_sample_angle_idxes.append(sample_angle_idxes)
-                    batch_sample_distance_idxes.append(sample_distance_idxes)
-                    # batch_way_log_prob.append(
-                    #     probs_c.log_prob(way_heats_act))
-            else:
-                # batch_way_log_prob = None
-                None
-            
-            rgb_feats = self.space_pool_rgb(rgb_feats)
-            depth_feats = self.space_pool_depth(depth_feats)
-
-            # for cand
-            cand_rgb = []
-            cand_depth = []
-            cand_angle_fts = []
-            cand_img_idxes = []
-            cand_angles = []
-            cand_distances = []
-            for j in range(batch_size):
-                if in_train:
-                    angle_idxes = torch.tensor(batch_sample_angle_idxes[j])
-                    distance_idxes = torch.tensor(batch_sample_distance_idxes[j])
-                else:
-                    angle_idxes = batch_output_map[j].nonzero()[:, 0]
-                    distance_idxes = batch_output_map[j].nonzero()[:, 1]
-                # for angle & distance
-                angle_rad_c = angle_idxes.cpu().float()/120*2*math.pi       # 顺时针
-                angle_rad_cc = 2*math.pi-angle_idxes.float()/120*2*math.pi  # 逆时针
-                cand_angle_fts.append( angle_feature_torch(angle_rad_c) )
-                cand_angles.append(angle_rad_cc.tolist())
-                cand_distances.append( ((distance_idxes + 1)*0.25).tolist() )
-                # for img idxes
-                img_idxes = 12 - (angle_idxes.cpu().numpy()+5) // 10        # 逆时针
-                img_idxes[img_idxes==12] = 0
-                cand_img_idxes.append(img_idxes)
-                # for rgb & depth
-                cand_rgb.append(rgb_feats[j, img_idxes, ...])
-                cand_depth.append(depth_feats[j, img_idxes, ...])
-            
-            # for pano
-            pano_rgb = rgb_feats                            # B x 12 x 2048
-            pano_depth = depth_feats                        # B x 12 x 128
-            pano_angle_fts = deepcopy(self.pano_angle_fts)  # 12 x 4
-            pano_img_idxes = deepcopy(self.pano_img_idxes)  # 12
-
-            # cand_angle_fts 顺时针
-            # cand_angles 逆时针
-            outputs = {
-                'cand_rgb': cand_rgb,               # [K x 2048]
-                'cand_depth': cand_depth,           # [K x 128]
-                'cand_angle_fts': cand_angle_fts,   # [K x 4]
-                'cand_img_idxes': cand_img_idxes,   # [K]
-                'cand_angles': cand_angles,         # [K]
-                'cand_distances': cand_distances,   # [K]
-
-                'pano_rgb': pano_rgb,               # B x 12 x 2048
-                'pano_depth': pano_depth,           # B x 12 x 128
-                'pano_angle_fts': pano_angle_fts,   # 12 x 4
-                'pano_img_idxes': pano_img_idxes,   # 12 
-            }
-            
-            return outputs
+            provider = waypoint_provider
+            if provider is None:
+                provider = OriginalETPWaypointProvider(
+                    rgb_encoder=self.rgb_encoder,
+                    depth_encoder=self.depth_encoder,
+                    rgb_pool=self.space_pool_rgb,
+                    depth_pool=self.space_pool_depth,
+                    waypoint_predictor=waypoint_predictor,
+                    pano_angle_features=self.pano_angle_fts,
+                    pano_image_indexes=self.pano_img_idxes,
+                )
+            return provider.predict(observations, in_train=in_train)
 
         elif mode == 'panorama':
             rgb_fts = self.drop_env(rgb_fts)

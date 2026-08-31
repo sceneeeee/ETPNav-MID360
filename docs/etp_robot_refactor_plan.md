@@ -127,6 +127,12 @@ Isaac conditionals inside the ETP model or graph modules.
 
 ## Staged migration
 
+Current progress while licensed MP3D is pending: the narrow WaypointProvider seam,
+bit-identical Original adapter, metric-depth point-cloud adapter, and an
+evaluation-only MID360-like geometric adapter have been implemented and smoke-tested
+on five official Habitat test-scene poses. PoseProvider and Executor remain design
+only. Formal episode equivalence still requires authorized MP3D.
+
 ### Phase 0: characterize the original baseline
 
 Keep the current official checkpoint and code path as the oracle. Save fixed-input
@@ -218,5 +224,7 @@ decision, not an emergency-stop mechanism.
 
 ## Next recommended step
 
-抽离 WaypointProvider / PoseProvider，并开始 Habitat 内的 MID360 waypoint frontend
-实验。
+Do not expand the example-scene algorithm. Wait for officially authorized full
+MP3D scenes, then immediately run Original versus Geometry R2R-CE evaluation for
+1, 5, and 20 fixed `val_unseen` episodes. Only after that evidence should the next
+choice be made between a LiDAR geometry feature adapter and Isaac Sim validation.

@@ -1,0 +1,258 @@
+import math
+import os
+
+import numpy as np
+import torch
+import yaml
+
+from vlnce_baselines.perception.depth_to_pointcloud import depth_panorama_to_pointcloud
+from vlnce_baselines.perception.mid360_like_filter import MID360LikeFilter
+from vlnce_baselines.perception.local_traversability import (
+    TraversabilityConfig,
+    compute_local_traversability,
+)
+from vlnce_baselines.waypoint_pred.utils import nms
+from vlnce_baselines.waypoint_provider.base import WaypointProvider
+from vlnce_baselines.waypoint_provider.original_etp import (
+    NUM_IMAGES,
+    construct_waypoint_output,
+    encode_panorama,
+)
+
+
+def select_geometry_candidates(score, max_candidates=5):
+    """Apply the original ETP circular NMS contract to a geometry score."""
+    score_tensor = torch.from_numpy(np.asarray(score, dtype=np.float32))
+    if score_tensor.shape != (120, 12):
+        raise ValueError("geometry score must have shape 120x12")
+    wrapped = torch.cat(
+        (score_tensor[-1:, :], score_tensor, score_tensor[:1, :]), dim=0
+    )
+    selected = nms(
+        wrapped.unsqueeze(0).unsqueeze(0),
+        max_predictions=max_candidates,
+        sigma=(7.0, 5.0),
+    ).squeeze(0).squeeze(0)[1:-1, :]
+    indexes = selected.nonzero()
+    return (
+        indexes[:, 0].cpu().numpy().astype(np.int64),
+        indexes[:, 1].cpu().numpy().astype(np.int64),
+    )
+
+
+class MID360GeometryConfig(object):
+    REQUIRED_KEYS = (
+        "angular_bins",
+        "distance_bins",
+        "distance_step_m",
+        "maximum_distance_m",
+        "maximum_candidates",
+        "camera_height_m",
+        "horizontal_fov_degrees",
+        "policy_depth_minimum_m",
+        "policy_depth_maximum_m",
+        "depth_pixel_stride",
+        "minimum_range_m",
+        "maximum_range_m",
+        "vertical_fov_min_degrees",
+        "vertical_fov_max_degrees",
+        "azimuth_bin_degrees",
+        "elevation_bin_degrees",
+        "voxel_size_m",
+        "robot_radius_m",
+        "robot_radius_status",
+        "clearance_margin_m",
+        "obstacle_height_min_m",
+        "obstacle_height_max_m",
+        "grid_resolution_m",
+    )
+
+    def __init__(self, values):
+        missing = [key for key in self.REQUIRED_KEYS if key not in values]
+        if missing:
+            raise ValueError("MID360 geometry config is missing: {}".format(missing))
+        self.values = dict(values)
+        for key, value in self.values.items():
+            setattr(self, key, value)
+        contracted_range = self.distance_bins * self.distance_step_m
+        if abs(contracted_range - self.maximum_distance_m) > 1e-6:
+            raise ValueError("distance bins and maximum distance disagree")
+        if self.angular_bins != 120 or self.distance_bins != 12:
+            raise ValueError("ETP geometry contract requires a 120x12 score map")
+        if self.distance_step_m <= 0 or self.maximum_distance_m <= 0:
+            raise ValueError("candidate distance parameters must be positive")
+        if self.maximum_candidates < 1:
+            raise ValueError("maximum_candidates must be positive")
+        if self.depth_pixel_stride < 1:
+            raise ValueError("depth_pixel_stride must be positive")
+        if self.minimum_range_m < 0 or self.maximum_range_m <= self.minimum_range_m:
+            raise ValueError("sensor range bounds are invalid")
+        if self.robot_radius_m <= 0 or self.clearance_margin_m < 0:
+            raise ValueError("footprint parameters are invalid")
+        if self.grid_resolution_m <= 0 or self.voxel_size_m < 0:
+            raise ValueError("geometry resolutions are invalid")
+        if self.obstacle_height_max_m < self.obstacle_height_min_m:
+            raise ValueError("obstacle height bounds are invalid")
+        if self.vertical_fov_max_degrees <= self.vertical_fov_min_degrees:
+            raise ValueError("vertical FoV bounds are invalid")
+
+        footprint_extent = (
+            self.maximum_distance_m
+            + self.robot_radius_m
+            + self.clearance_margin_m
+        )
+        vertical_extent = max(
+            abs(self.obstacle_height_min_m - self.camera_height_m),
+            abs(self.obstacle_height_max_m - self.camera_height_m),
+        )
+        required_sensor_range = math.hypot(footprint_extent, vertical_extent)
+        if self.maximum_range_m + 1e-6 < required_sensor_range:
+            raise ValueError(
+                "sensor range must cover candidate footprint and obstacle-height "
+                "extent: {} < {}".format(
+                    self.maximum_range_m, required_sensor_range
+                )
+            )
+
+    @classmethod
+    def from_yaml(cls, path):
+        with open(path, "r") as handle:
+            values = yaml.safe_load(handle)
+        return cls(values)
+
+    def traversability(self):
+        return TraversabilityConfig(
+            angular_bins=self.angular_bins,
+            distance_bins=self.distance_bins,
+            distance_step_m=self.distance_step_m,
+            robot_radius_m=self.robot_radius_m,
+            clearance_margin_m=self.clearance_margin_m,
+            obstacle_height_min_m=self.obstacle_height_min_m,
+            obstacle_height_max_m=self.obstacle_height_max_m,
+            grid_resolution_m=self.grid_resolution_m,
+        )
+
+
+class MID360GeometryWaypointProvider(WaypointProvider):
+    """Replace only learned proposal generation with local geometry."""
+
+    def __init__(
+        self,
+        rgb_encoder,
+        depth_encoder,
+        rgb_pool,
+        depth_pool,
+        pano_angle_features,
+        pano_image_indexes,
+        config,
+    ):
+        self.rgb_encoder = rgb_encoder
+        self.depth_encoder = depth_encoder
+        self.rgb_pool = rgb_pool
+        self.depth_pool = depth_pool
+        self.pano_angle_features = pano_angle_features
+        self.pano_image_indexes = pano_image_indexes
+        self.config = config
+        self.lidar_filter = MID360LikeFilter(
+            minimum_range_m=config.minimum_range_m,
+            maximum_range_m=config.maximum_range_m,
+            vertical_fov_min_degrees=config.vertical_fov_min_degrees,
+            vertical_fov_max_degrees=config.vertical_fov_max_degrees,
+            azimuth_bin_degrees=config.azimuth_bin_degrees,
+            elevation_bin_degrees=config.elevation_bin_degrees,
+            voxel_size_m=config.voxel_size_m,
+            sensor_height_m=config.camera_height_m,
+        )
+        self.traversability_config = config.traversability()
+        self.last_debug = []
+
+    def _metric_depth_views(self, observations, batch_index):
+        views = []
+        headings = []
+        for key, value in observations.items():
+            if "depth" not in key:
+                continue
+            suffix = key[len("depth") :]
+            headings.append(float(suffix[1:]) if suffix else 0.0)
+            normalized = value[batch_index].detach().cpu().numpy()
+            depth_range = (
+                self.config.policy_depth_maximum_m
+                - self.config.policy_depth_minimum_m
+            )
+            views.append(
+                normalized * depth_range
+                + self.config.policy_depth_minimum_m
+            )
+        if len(views) != NUM_IMAGES:
+            raise ValueError(
+                "geometry provider requires 12 depth views, received {}".format(
+                    len(views)
+                )
+            )
+        return views, headings
+
+    def predict(self, observations, in_train=False):
+        if in_train:
+            raise ValueError(
+                "MID360GeometryWaypointProvider V0 is evaluation-only"
+            )
+        encoded = encode_panorama(
+            observations=observations,
+            rgb_encoder=self.rgb_encoder,
+            depth_encoder=self.depth_encoder,
+            rgb_pool=self.rgb_pool,
+            depth_pool=self.depth_pool,
+        )
+        batch_angle_indexes = []
+        batch_distance_indexes = []
+        debug = []
+        for batch_index in range(encoded.batch_size):
+            depth_views, headings = self._metric_depth_views(
+                observations, batch_index
+            )
+            merged_cloud = depth_panorama_to_pointcloud(
+                depth_views,
+                headings_degrees=headings,
+                horizontal_fov_degrees=self.config.horizontal_fov_degrees,
+                camera_height_m=self.config.camera_height_m,
+                minimum_depth_m=self.config.minimum_range_m,
+                maximum_depth_m=self.config.maximum_range_m,
+                pixel_stride=self.config.depth_pixel_stride,
+            )
+            filtered_cloud = self.lidar_filter(merged_cloud)
+            traversability = compute_local_traversability(
+                filtered_cloud, self.traversability_config
+            )
+            angle_indexes, distance_indexes = select_geometry_candidates(
+                traversability.score,
+                max_candidates=self.config.maximum_candidates,
+            )
+            batch_angle_indexes.append(torch.from_numpy(angle_indexes))
+            batch_distance_indexes.append(torch.from_numpy(distance_indexes))
+            debug.append(
+                {
+                    "merged_pointcloud": merged_cloud,
+                    "filtered_pointcloud": filtered_cloud,
+                    "traversability": traversability,
+                    "angle_indexes": angle_indexes,
+                    "distance_indexes": distance_indexes,
+                    "headings_degrees": headings,
+                }
+            )
+        output = construct_waypoint_output(
+            encoded=encoded,
+            batch_angle_indexes=batch_angle_indexes,
+            batch_distance_indexes=batch_distance_indexes,
+            pano_angle_features=self.pano_angle_features,
+            pano_image_indexes=self.pano_image_indexes,
+        )
+        self.last_debug = debug
+        return output
+
+
+def default_mid360_config_path():
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "configs",
+        "mid360_waypoint.yaml",
+    )
