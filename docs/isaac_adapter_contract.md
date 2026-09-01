@@ -7,7 +7,8 @@ into ETPNav and does not alter the frozen MID360 V0 algorithm.
 
 ```text
 Isaac task/runtime
-  -> ObservationProvider
+  -> RGBPanoramaProvider -> 12 RGB views for ETP semantic features
+  -> GeometryProvider -> one base-frame point cloud for waypoint geometry
   -> PoseProvider
   -> unchanged OriginalETPWaypointProvider or MID360GeometryWaypointProvider
   -> unchanged ETP GraphMap/planner
@@ -15,11 +16,12 @@ Isaac task/runtime
   -> Isaac task/runtime
 ```
 
-There are four independent interfaces:
+There are five independent interfaces:
 
 | Interface | Simulator baseline | Initial Isaac implementation | Later robot implementation |
 |---|---|---|---|
-| ObservationProvider | HabitatObservationProvider | IsaacObservationProvider | ROSObservationProvider |
+| RGBPanoramaProvider | Habitat RGB panorama | Isaac RGB panorama | robot RGB panorama |
+| GeometryProvider | V0 depth reconstruction | V1 raycast/LiDAR point cloud | MID360 point cloud |
 | PoseProvider | HabitatPoseProvider | IsaacGroundTruthPoseProvider | FastLIOPoseProvider |
 | WaypointProvider | Original / MID360Geometry | same frozen providers | later LiDAR geometry provider |
 | Executor | HabitatExecutor | IsaacExecutor | MPPIExecutor |
@@ -28,10 +30,18 @@ Simulator ground-truth pose is mandatory for the first Isaac experiment.
 FAST-LIO is intentionally excluded so localization cannot confound the adapter
 and planner validation.
 
-## ObservationProvider
+## RGBPanoramaProvider and legacy observation adapter
 
-`ObservationProvider.get_observations()` returns the existing ordered ETP map.
-It does not return Isaac sensor objects.
+`RGBPanoramaProvider.get_rgb_by_heading()` is the forward-looking semantic
+contract. It returns twelve synchronized RGB views at headings `0,30,...,330`.
+It does not imply that a depth image is available at each heading.
+
+The frozen ETP V0 model cannot yet consume RGB alone: its existing
+`encode_panorama` feature path also constructs a 12-view depth embedding. For
+V0 only, `ObservationProvider.get_observations()` and
+`IsaacPanoramaObservationAdapter.adapt(rgb_by_heading, depth_by_heading)`
+therefore retain the existing interleaved RGB/depth map. This is a legacy
+feature-compatibility adapter, not the target sensor architecture.
 
 Required keys, in insertion order:
 
@@ -72,17 +82,19 @@ It is an offline contract adapter, not proof that Isaac ran. A future runtime
 provider owns Isaac imports, Camera data access, and any GPU/CPU or interprocess
 transport, then calls this adapter at the ETP process boundary.
 
-### Rig construction
+### V0 compatibility capture
 
-The exact rig is 12 yaw stations, each containing two co-located cameras:
+The offline V0 adapter accepts 12 RGB and 12 depth arrays because the frozen
+ETP encoder requires both. It does **not** implement or prescribe an Isaac
+camera rig. If used for a V0 rendering experiment, a compatibility rig would
+need 12 yaw stations with co-located RGB/depth outputs, but that is temporary
+test infrastructure and is not the final architecture.
 
 - RGB camera: 224x224, `rgb`;
 - depth camera: 256x256, `distance_to_image_plane`;
 - shared pose and 90-degree horizontal FoV.
 
-This is 24 Isaac Camera prims because resolution is per `CameraCfg`, not per
-annotator type. They are perception-only and must not alter robot mass,
-collision shapes, articulation or control rate.
+No 12-camera Isaac rig is checked in by this milestone.
 
 ### Heading mapping
 
@@ -126,10 +138,29 @@ The R2R-to-Isaac dataset commonly maps Habitat positions as `(x,y,z)` to
 come from Isaac state; it must never be recreated from the source Habitat
 episode using only that formula.
 
-## WaypointProvider
+## GeometryProvider and WaypointProvider
 
-No new waypoint interface is needed for ISAAC-V0. Both frozen implementations
-consume the exact observation map above and return the established contract:
+`MID360GeometryWaypointProvider` now obtains geometry through the narrow
+`GeometryProvider.get_geometry(observations, batch_index)` seam. It receives a
+`GeometryFrame` containing a finite `Nx3` point cloud expressed in the current
+robot/base frame. Filtering, traversability, 120x12 scoring, NMS, and ETP
+candidate construction remain owned by the frozen waypoint provider.
+
+Sources are explicitly staged:
+
+| Stage | GeometryProvider source | Status |
+|---|---|---|
+| V0 | `DepthReconstructedGeometryProvider`: 12 normalized legacy depth views -> metric depth -> point cloud | implemented default |
+| V1 Isaac | simulated LiDAR/raycast point cloud transformed into base frame | contract only; not implemented |
+| robot | real MID360 point cloud transformed into base frame | contract only; not implemented |
+
+V1 replaces only the **depth-reconstructed geometric proposal input**. It does
+not make twelve depth cameras part of the final design. It also does not by
+itself remove the frozen ETP depth-feature outputs below. That requires an
+explicit compatible replacement or a retrained/refactored planner and is out
+of scope for V0/V1 geometry work.
+
+Both frozen waypoint implementations still return the established contract:
 
 ```text
 cand_rgb, cand_depth, cand_angle_fts, cand_img_idxes,
@@ -137,15 +168,14 @@ cand_angles, cand_distances,
 pano_rgb, pano_depth, pano_angle_fts, pano_img_idxes
 ```
 
-ISAAC-V0 feeds normalized Isaac depth to the existing reconstruction and
-MID360-like filter. Original and Geometry must see identical pano RGB/depth for
-an ablation. The frozen provider and scoring code are not to be retuned during
-adapter work.
+V0 feeds normalized depth to the existing reconstruction and MID360-like filter.
+Original and Geometry must see identical `pano_rgb`/`pano_depth` for a V0
+ablation. The frozen provider and scoring code are not to be retuned.
 
-ISAAC-V1 adds a point-cloud acquisition adapter before the existing
-traversability stage. Initial preferred source is the pinned Lab
-`RayCasterCfg.ray_hits_w`, transformed from world into base frame. RTX LiDAR is
-a later alternative, not an implicit MID360 model.
+V1 will add a native point-cloud acquisition adapter before the existing
+filter/traversability stage. A pinned Lab `RayCasterCfg.ray_hits_w`, transformed
+from world into base frame, is one candidate source. Neither Isaac LiDAR nor a
+raycast implementation is included here.
 
 ## Executor
 
@@ -180,7 +210,7 @@ reaching a geometric target alone is not a successful VLN episode.
 
 The offline tests enforce:
 
-- all twelve headings are present and no extra heading is accepted;
+- V0 has all twelve RGB and depth headings, and rejects extras;
 - stable interleaved key insertion order;
 - exact RGB/depth sizes, channel layouts and dtypes;
 - RGBA-to-RGB conversion;
@@ -195,4 +225,7 @@ Runtime acceptance remains separate:
 3. validate camera poses/intrinsics and all 12 timestamps;
 4. compare adapter output to these offline invariants;
 5. run Original and frozen Geometry waypoint forwards on the same tick;
-6. only then add Matterport USD and the executor.
+6. pass a native base-frame point cloud through `GeometryProvider` without
+   changing scoring;
+7. separately decide how a non-depth ETP feature contract will replace or
+   retrain legacy `pano_depth`/`cand_depth` features.

@@ -5,7 +5,10 @@ import numpy as np
 import torch
 import yaml
 
-from vlnce_baselines.perception.depth_to_pointcloud import depth_panorama_to_pointcloud
+from vlnce_baselines.perception.geometry_provider import (
+    DepthReconstructedGeometryProvider,
+    GeometryProvider,
+)
 from vlnce_baselines.perception.mid360_like_filter import MID360LikeFilter
 from vlnce_baselines.perception.local_traversability import (
     TraversabilityConfig,
@@ -14,7 +17,6 @@ from vlnce_baselines.perception.local_traversability import (
 from vlnce_baselines.waypoint_pred.utils import nms
 from vlnce_baselines.waypoint_provider.base import WaypointProvider
 from vlnce_baselines.waypoint_provider.original_etp import (
-    NUM_IMAGES,
     construct_waypoint_output,
     encode_panorama,
 )
@@ -145,6 +147,7 @@ class MID360GeometryWaypointProvider(WaypointProvider):
         pano_angle_features,
         pano_image_indexes,
         config,
+        geometry_provider=None,
     ):
         self.rgb_encoder = rgb_encoder
         self.depth_encoder = depth_encoder
@@ -153,6 +156,11 @@ class MID360GeometryWaypointProvider(WaypointProvider):
         self.pano_angle_features = pano_angle_features
         self.pano_image_indexes = pano_image_indexes
         self.config = config
+        if geometry_provider is None:
+            geometry_provider = DepthReconstructedGeometryProvider(config)
+        if not isinstance(geometry_provider, GeometryProvider):
+            raise TypeError("geometry_provider must implement GeometryProvider")
+        self.geometry_provider = geometry_provider
         self.lidar_filter = MID360LikeFilter(
             minimum_range_m=config.minimum_range_m,
             maximum_range_m=config.maximum_range_m,
@@ -165,31 +173,6 @@ class MID360GeometryWaypointProvider(WaypointProvider):
         )
         self.traversability_config = config.traversability()
         self.last_debug = []
-
-    def _metric_depth_views(self, observations, batch_index):
-        views = []
-        headings = []
-        for key, value in observations.items():
-            if "depth" not in key:
-                continue
-            suffix = key[len("depth") :]
-            headings.append(float(suffix[1:]) if suffix else 0.0)
-            normalized = value[batch_index].detach().cpu().numpy()
-            depth_range = (
-                self.config.policy_depth_maximum_m
-                - self.config.policy_depth_minimum_m
-            )
-            views.append(
-                normalized * depth_range
-                + self.config.policy_depth_minimum_m
-            )
-        if len(views) != NUM_IMAGES:
-            raise ValueError(
-                "geometry provider requires 12 depth views, received {}".format(
-                    len(views)
-                )
-            )
-        return views, headings
 
     def predict(self, observations, in_train=False):
         if in_train:
@@ -207,18 +190,10 @@ class MID360GeometryWaypointProvider(WaypointProvider):
         batch_distance_indexes = []
         debug = []
         for batch_index in range(encoded.batch_size):
-            depth_views, headings = self._metric_depth_views(
+            geometry = self.geometry_provider.get_geometry(
                 observations, batch_index
             )
-            merged_cloud = depth_panorama_to_pointcloud(
-                depth_views,
-                headings_degrees=headings,
-                horizontal_fov_degrees=self.config.horizontal_fov_degrees,
-                camera_height_m=self.config.camera_height_m,
-                minimum_depth_m=self.config.minimum_range_m,
-                maximum_depth_m=self.config.maximum_range_m,
-                pixel_stride=self.config.depth_pixel_stride,
-            )
+            merged_cloud = geometry.pointcloud
             filtered_cloud = self.lidar_filter(merged_cloud)
             traversability = compute_local_traversability(
                 filtered_cloud, self.traversability_config
@@ -236,7 +211,8 @@ class MID360GeometryWaypointProvider(WaypointProvider):
                     "traversability": traversability,
                     "angle_indexes": angle_indexes,
                     "distance_indexes": distance_indexes,
-                    "headings_degrees": headings,
+                    "geometry_source": geometry.source,
+                    "headings_degrees": geometry.headings_degrees,
                 }
             )
         output = construct_waypoint_output(
