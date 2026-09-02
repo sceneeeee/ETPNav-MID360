@@ -36,6 +36,9 @@ class EvaluationTelemetryTest(unittest.TestCase):
         torch.testing.assert_close(output["policy_logits"], expected_logits)
         self.assertEqual(output["cand_distances"], [[1.0, 1.25]])
         self.assertEqual(telemetry.episodes["fixed"]["waypoint_trace"][0]["selected_candidate_index"], 1)
+        telemetry.record_waypoint_outcome("fixed", collision=True, distance_to_goal=2.0)
+        self.assertTrue(telemetry.episodes["fixed"]["waypoint_trace"][0]["collision"])
+        self.assertEqual(telemetry.episodes["fixed"]["waypoint_trace"][0]["distance_to_goal"], 2.0)
 
     def test_report_records_trajectory_latency_metrics_and_cuda_memory(self):
         telemetry = EvaluationTelemetry()

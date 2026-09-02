@@ -38,6 +38,15 @@ class EvaluationTelemetry(object):
             raise KeyError("episode telemetry was not started: {}".format(episode_key))
         self.episodes[episode_key]["waypoint_trace"].append(record)
 
+    def record_waypoint_outcome(self, episode_id, collision, distance_to_goal):
+        """Attach simulator outcome to the most recent decision record."""
+        episode_key = str(episode_id)
+        trace = self.episodes[episode_key]["waypoint_trace"]
+        if not trace:
+            raise ValueError("waypoint outcome has no preceding decision")
+        trace[-1]["collision"] = bool(collision)
+        trace[-1]["distance_to_goal"] = float(distance_to_goal)
+
     def finish_episode(
         self,
         episode_id,

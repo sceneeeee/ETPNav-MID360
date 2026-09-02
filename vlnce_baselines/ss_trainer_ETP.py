@@ -1010,6 +1010,8 @@ class RLTrainer(BaseVLNCETrainer):
                         selected_ghost = str(nav_inputs['gmap_vp_ids'][i][action_index])
                     trace_record = {
                         'step_index': int(stepk),
+                        'decision_timestamp_monotonic_ms': time.perf_counter() * 1000.0,
+                        'coordinate_frame': 'habitat_y_up_negative_z_forward',
                         'agent_position': [float(x) for x in cur_pos[i]],
                         'agent_heading': float(heading_from_quaternion(cur_ori[i])),
                         'candidates': self._waypoint_candidates(wp_outputs, i),
@@ -1119,11 +1121,13 @@ class RLTrainer(BaseVLNCETrainer):
             # calculate metric
             if mode == 'eval':
                 for i, info in enumerate(infos):
-                    trace = self.eval_telemetry.episodes[decision_episode_ids[i]]['waypoint_trace'][-1]
                     collision_count = int(info.get('collisions', {}).get('count', 0))
-                    trace['collision'] = collision_count > self.eval_collision_counts[decision_episode_ids[i]]
+                    self.eval_telemetry.record_waypoint_outcome(
+                        decision_episode_ids[i],
+                        collision_count > self.eval_collision_counts[decision_episode_ids[i]],
+                        info['position']['distance'][-1],
+                    )
                     self.eval_collision_counts[decision_episode_ids[i]] = collision_count
-                    trace['distance_to_goal'] = float(info['position']['distance'][-1])
                 curr_eps = self.envs.current_episodes()
                 for i in range(self.envs.num_envs):
                     if not dones[i]:
