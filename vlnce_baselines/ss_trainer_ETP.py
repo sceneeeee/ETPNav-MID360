@@ -33,7 +33,7 @@ from vlnce_baselines.common.aux_losses import AuxLosses
 from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
 from vlnce_baselines.common.utils import extract_instruction_tokens
-from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
+from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST, heading_from_quaternion
 from vlnce_baselines.evaluation_telemetry import EvaluationTelemetry
 from vlnce_baselines.utils import reduce_loss
 
@@ -263,6 +263,20 @@ class RLTrainer(BaseVLNCETrainer):
             pano_image_indexes=policy_net.pano_img_idxes,
             config=MID360GeometryConfig.from_yaml(self.config.MODEL.MID360_CONFIG_PATH),
         )
+
+    @staticmethod
+    def _waypoint_candidates(output, index):
+        return [
+            {
+                'angle': float(angle),
+                'distance': float(distance),
+                'panorama_image_index': int(image_index),
+            }
+            for angle, distance, image_index in zip(
+                output['cand_angles'][index], output['cand_distances'][index],
+                output['cand_img_idxes'][index],
+            )
+        ]
 
     def _teacher_action(self, batch_angles, batch_distances, candidate_lengths):
         if self.config.MODEL.task_type == 'r2r':
@@ -582,6 +596,13 @@ class RLTrainer(BaseVLNCETrainer):
             if os.path.exists(fname) and not os.path.isfile(self.config.EVAL.CKPT_PATH_DIR):
                 print("skipping -- evaluation exists.")
                 return
+        selected_episode_ids = [str(x) for x in self.config.EVAL.EPISODE_IDS]
+        if selected_episode_ids:
+            allowed = set(selected_episode_ids)
+            self.traj = [episode_id for episode_id in self.traj if str(episode_id) in allowed]
+            missing = allowed - set(map(str, self.traj))
+            if missing:
+                raise ValueError('requested evaluation episode IDs not found: {}'.format(sorted(missing)))
         self.envs = construct_envs(
             self.config, 
             get_env_class(self.config.ENV_NAME),
@@ -607,6 +628,7 @@ class RLTrainer(BaseVLNCETrainer):
 
         self.eval_telemetry = EvaluationTelemetry()
         self.eval_episode_started_at = {}
+        self.eval_collision_counts = {}
         torch.cuda.synchronize(self.device)
         torch.cuda.reset_peak_memory_stats(self.device)
         evaluation_started_at = time.perf_counter()
@@ -837,6 +859,7 @@ class RLTrainer(BaseVLNCETrainer):
                 )
                 if episode_key not in self.eval_episode_started_at:
                     self.eval_episode_started_at[episode_key] = time.perf_counter()
+                self.eval_collision_counts.setdefault(episode_key, 0)
         if mode == 'infer':
             env_to_pause = [i for i, ep in enumerate(self.envs.current_episodes()) 
                             if ep.episode_id in self.path_eps]    
@@ -978,6 +1001,29 @@ class RLTrainer(BaseVLNCETrainer):
             env_actions = []
             use_tryout = (self.config.IL.tryout and not self.config.TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING)
             for i, gmap in enumerate(self.gmaps):
+                trace_record = None
+                if mode == 'eval':
+                    action_index = int(cpu_a_t[i])
+                    stop = bool(action_index == 0 or stepk == self.max_len - 1 or no_vp_left[i])
+                    selected_ghost = None
+                    if not stop:
+                        selected_ghost = str(nav_inputs['gmap_vp_ids'][i][action_index])
+                    trace_record = {
+                        'step_index': int(stepk),
+                        'agent_position': [float(x) for x in cur_pos[i]],
+                        'agent_heading': float(heading_from_quaternion(cur_ori[i])),
+                        'candidates': self._waypoint_candidates(wp_outputs, i),
+                        # Navigation selects from graph ghosts rather than this
+                        # step's raw candidates, so the raw index is not defined.
+                        'selected_candidate_index': None,
+                        'selected_waypoint': None,
+                        'selected_graph_node_or_ghost_id': selected_ghost,
+                        'stop': stop,
+                        'visited_node_count': len(gmap.node_pos),
+                        'ghost_node_count': len(gmap.ghost_aug_pos),
+                    }
+                    if self.eval_waypoint_provider is not None:
+                        trace_record['geometry_timing_ms'] = self.eval_waypoint_provider.last_timings[i]
                 if cpu_a_t[i] == 0 or stepk == self.max_len - 1 or no_vp_left[i]:
                     # stop at node with max stop_prob
                     vp_stop_scores = [(vp, stop_score) for vp, stop_score in gmap.node_stop_scores.items()]
@@ -1011,6 +1057,21 @@ class RLTrainer(BaseVLNCETrainer):
                     ghost_pos = gmap.ghost_aug_pos[ghost_vp]
                     _, front_vp = gmap.front_to_ghost_dist(ghost_vp)
                     front_pos = gmap.node_pos[front_vp]
+                    if trace_record is not None:
+                        candidate_index = None
+                        for j, position in enumerate(cand_pos[i]):
+                            if np.linalg.norm(np.asarray(position) - ghost_pos) < 1e-5:
+                                candidate_index = j
+                                break
+                        selected = {
+                            'distance': float(np.linalg.norm(ghost_pos - front_pos)),
+                            'candidate_index': candidate_index,
+                        }
+                        if candidate_index is not None:
+                            selected['angle'] = float(wp_outputs['cand_angles'][i][candidate_index])
+                            selected['distance'] = float(wp_outputs['cand_distances'][i][candidate_index])
+                            trace_record['selected_candidate_index'] = candidate_index
+                        trace_record['selected_waypoint'] = selected
                     if self.config.VIDEO_OPTION:
                         teacher_action_cpu = teacher_actions[i].cpu().item()
                         if teacher_action_cpu in [0, -100]:
@@ -1047,12 +1108,22 @@ class RLTrainer(BaseVLNCETrainer):
                     prev_vp[i] = front_vp
                     if self.config.MODEL.consume_ghost:
                         gmap.delete_ghost(ghost_vp)
+                if trace_record is not None:
+                    self.eval_telemetry.record_waypoint_decision(
+                        decision_episode_ids[i], trace_record
+                    )
 
             outputs = self.envs.step(env_actions)
             observations, _, dones, infos = [list(x) for x in zip(*outputs)]
 
             # calculate metric
             if mode == 'eval':
+                for i, info in enumerate(infos):
+                    trace = self.eval_telemetry.episodes[decision_episode_ids[i]]['waypoint_trace'][-1]
+                    collision_count = int(info.get('collisions', {}).get('count', 0))
+                    trace['collision'] = collision_count > self.eval_collision_counts[decision_episode_ids[i]]
+                    self.eval_collision_counts[decision_episode_ids[i]] = collision_count
+                    trace['distance_to_goal'] = float(info['position']['distance'][-1])
                 curr_eps = self.envs.current_episodes()
                 for i in range(self.envs.num_envs):
                     if not dones[i]:

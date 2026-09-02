@@ -21,6 +21,7 @@ class EvaluationTelemetry(object):
                     ("scene_id", scene_id),
                     ("trajectory_id", trajectory_id),
                     ("decision_latency_ms", []),
+                    ("waypoint_trace", []),
                 ]
             )
 
@@ -29,6 +30,13 @@ class EvaluationTelemetry(object):
         if episode_key not in self.episodes:
             raise KeyError("episode telemetry was not started: {}".format(episode_key))
         self.episodes[episode_key]["decision_latency_ms"].append(float(elapsed_ms))
+
+    def record_waypoint_decision(self, episode_id, record):
+        """Append JSON-safe data after a policy action is chosen."""
+        episode_key = str(episode_id)
+        if episode_key not in self.episodes:
+            raise KeyError("episode telemetry was not started: {}".format(episode_key))
+        self.episodes[episode_key]["waypoint_trace"].append(record)
 
     def finish_episode(
         self,

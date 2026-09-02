@@ -29,6 +29,7 @@ _C.EVAL = CN()
 # The split to evaluate on
 _C.EVAL.SPLIT = "val_seen"
 _C.EVAL.EPISODE_COUNT = -1
+_C.EVAL.EPISODE_IDS = []  # Optional exact evaluation subset; preserves order.
 _C.EVAL.LANGUAGES = ["en-US", "en-IN"]
 _C.EVAL.SAMPLE = False
 _C.EVAL.SAVE_RESULTS = True

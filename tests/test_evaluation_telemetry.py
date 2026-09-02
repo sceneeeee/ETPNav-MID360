@@ -3,10 +3,40 @@ import os
 import tempfile
 import unittest
 
+import torch
+
 from vlnce_baselines.evaluation_telemetry import EvaluationTelemetry
 
 
 class EvaluationTelemetryTest(unittest.TestCase):
+    def test_trace_collection_does_not_change_fixed_policy_output(self):
+        """Telemetry receives copied scalars, never the policy tensors."""
+        output = {
+            "cand_angles": [[0.1, 0.2]],
+            "cand_distances": [[1.0, 1.25]],
+            "cand_img_idxes": [torch.tensor([2, 3])],
+            "policy_logits": torch.tensor([[0.25, 0.75]]),
+        }
+        expected_logits = output["policy_logits"].clone()
+        telemetry = EvaluationTelemetry()
+        telemetry.start_episode("fixed", "scene")
+        telemetry.record_waypoint_decision(
+            "fixed",
+            {
+                "step_index": 0,
+                "candidates": [
+                    {"angle": float(angle), "distance": float(distance), "panorama_image_index": int(image)}
+                    for angle, distance, image in zip(
+                        output["cand_angles"][0], output["cand_distances"][0], output["cand_img_idxes"][0]
+                    )
+                ],
+                "selected_candidate_index": 1,
+            },
+        )
+        torch.testing.assert_close(output["policy_logits"], expected_logits)
+        self.assertEqual(output["cand_distances"], [[1.0, 1.25]])
+        self.assertEqual(telemetry.episodes["fixed"]["waypoint_trace"][0]["selected_candidate_index"], 1)
+
     def test_report_records_trajectory_latency_metrics_and_cuda_memory(self):
         telemetry = EvaluationTelemetry()
         telemetry.start_episode(

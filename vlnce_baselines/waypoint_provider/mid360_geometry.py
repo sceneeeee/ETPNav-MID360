@@ -1,5 +1,6 @@
 import math
 import os
+import time
 
 import numpy as np
 import torch
@@ -173,12 +174,14 @@ class MID360GeometryWaypointProvider(WaypointProvider):
         )
         self.traversability_config = config.traversability()
         self.last_debug = []
+        self.last_timings = []
 
     def predict(self, observations, in_train=False):
         if in_train:
             raise ValueError(
                 "MID360GeometryWaypointProvider V0 is evaluation-only"
             )
+        started = time.perf_counter()
         encoded = encode_panorama(
             observations=observations,
             rgb_encoder=self.rgb_encoder,
@@ -186,22 +189,32 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             rgb_pool=self.rgb_pool,
             depth_pool=self.depth_pool,
         )
+        visual_encoding_ms = (time.perf_counter() - started) * 1000.0
         batch_angle_indexes = []
         batch_distance_indexes = []
         debug = []
+        timings = []
         for batch_index in range(encoded.batch_size):
+            started = time.perf_counter()
             geometry = self.geometry_provider.get_geometry(
                 observations, batch_index
             )
+            pointcloud_ms = (time.perf_counter() - started) * 1000.0
             merged_cloud = geometry.pointcloud
+            started = time.perf_counter()
             filtered_cloud = self.lidar_filter(merged_cloud)
+            filter_ms = (time.perf_counter() - started) * 1000.0
+            started = time.perf_counter()
             traversability = compute_local_traversability(
                 filtered_cloud, self.traversability_config
             )
+            occupancy_traversability_ms = (time.perf_counter() - started) * 1000.0
+            started = time.perf_counter()
             angle_indexes, distance_indexes = select_geometry_candidates(
                 traversability.score,
                 max_candidates=self.config.maximum_candidates,
             )
+            candidate_construction_ms = (time.perf_counter() - started) * 1000.0
             batch_angle_indexes.append(torch.from_numpy(angle_indexes))
             batch_distance_indexes.append(torch.from_numpy(distance_indexes))
             debug.append(
@@ -215,6 +228,13 @@ class MID360GeometryWaypointProvider(WaypointProvider):
                     "headings_degrees": geometry.headings_degrees,
                 }
             )
+            timings.append({
+                'shared_visual_encoding': visual_encoding_ms,
+                'depth_back_projection': pointcloud_ms,
+                'mid360_like_filtering': filter_ms,
+                'occupancy_inflation_traversability': occupancy_traversability_ms,
+                'nms_candidate_construction': candidate_construction_ms,
+            })
         output = construct_waypoint_output(
             encoded=encoded,
             batch_angle_indexes=batch_angle_indexes,
@@ -223,6 +243,7 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             pano_image_indexes=self.pano_image_indexes,
         )
         self.last_debug = debug
+        self.last_timings = timings
         return output
 
 
