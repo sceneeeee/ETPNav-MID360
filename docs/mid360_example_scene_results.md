@@ -47,10 +47,12 @@ counter-clockwise panorama features.
 
 ## Five-pose comparison
 
-> **RERUN REQUIRED AFTER FINAL RANGE-GUARD CHANGE.** The table below is the last
-> captured engineering run from before the sensor-retention range was widened. It
-> remains useful as a development trace, but must be regenerated before these
-> numbers are treated as the current V0 result.
+Rerun on 2026-09-03 after the final range-guard change: PASS. The ignored source
+artifact is `outputs/example_scene_current/comparison/comparison_results.json`.
+The current run retained five geometry candidates per pose, zero panorama-feature
+difference, and 1,016.34 MiB peak allocated CUDA memory. The deterministic table
+below remains the comparison record; current mean full-provider latencies were
+32.69 ms Original and 75.48 ms Geometry.
 
 Angles below are counter-clockwise ETP output bearings. Latencies include the full
 provider call, including the shared RGB/depth encoders. Pose 0 contains cold-start

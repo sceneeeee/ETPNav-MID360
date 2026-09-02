@@ -5,8 +5,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 episodes="${1:-1}"
+provider="${2:-original_etp}"
 if [[ ! "${episodes}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "usage: $0 [positive_episode_count]" >&2
+  echo "usage: $0 [positive_episode_count] [original_etp|mid360_geometry]" >&2
+  exit 2
+fi
+if [[ "${provider}" != "original_etp" && "${provider}" != "mid360_geometry" ]]; then
+  echo "unknown waypoint provider: ${provider}" >&2
   exit 2
 fi
 
@@ -20,7 +25,7 @@ export GLOG_minloglevel="${GLOG_minloglevel:-2}"
 export MAGNUM_LOG="${MAGNUM_LOG:-quiet}"
 
 python run.py \
-  --exp_name "local_r2r_${episodes}ep" \
+  --exp_name "local_r2r_${provider}_${episodes}ep" \
   --run-type eval \
   --exp-config run_r2r/iter_train.yaml \
   SIMULATOR_GPU_IDS "[0]" \
@@ -33,5 +38,6 @@ python run.py \
   EVAL.CKPT_PATH_DIR data/logs/checkpoints/release_r2r/ckpt.iter12000.pth \
   IL.back_algo control \
   MODEL.pretrained_path None \
+  MODEL.WAYPOINT_PROVIDER "${provider}" \
   VIDEO_OPTION "[]" \
   TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True

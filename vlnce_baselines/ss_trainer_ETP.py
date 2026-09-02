@@ -34,6 +34,7 @@ from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
+from vlnce_baselines.evaluation_telemetry import EvaluationTelemetry
 from vlnce_baselines.utils import reduce_loss
 
 from .utils import get_camera_orientations12
@@ -239,6 +240,29 @@ class RLTrainer(BaseVLNCETrainer):
         logger.info("Finished setting up policy.")
 
         return start_iter
+
+    def _evaluation_waypoint_provider(self):
+        provider_name = self.config.MODEL.WAYPOINT_PROVIDER
+        if provider_name == 'original_etp':
+            return None
+        if provider_name != 'mid360_geometry':
+            raise ValueError('unknown evaluation waypoint provider: {}'.format(provider_name))
+
+        from vlnce_baselines.waypoint_provider.mid360_geometry import (
+            MID360GeometryConfig,
+            MID360GeometryWaypointProvider,
+        )
+
+        policy_net = self.policy.net.module if hasattr(self.policy.net, 'module') else self.policy.net
+        return MID360GeometryWaypointProvider(
+            rgb_encoder=policy_net.rgb_encoder,
+            depth_encoder=policy_net.depth_encoder,
+            rgb_pool=policy_net.space_pool_rgb,
+            depth_pool=policy_net.space_pool_depth,
+            pano_angle_features=policy_net.pano_angle_fts,
+            pano_image_indexes=policy_net.pano_img_idxes,
+            config=MID360GeometryConfig.from_yaml(self.config.MODEL.MID360_CONFIG_PATH),
+        )
 
     def _teacher_action(self, batch_angles, batch_distances, candidate_lengths):
         if self.config.MODEL.task_type == 'r2r':
@@ -579,6 +603,13 @@ class RLTrainer(BaseVLNCETrainer):
         )
         self.policy.eval()
         self.waypoint_predictor.eval()
+        self.eval_waypoint_provider = self._evaluation_waypoint_provider()
+
+        self.eval_telemetry = EvaluationTelemetry()
+        self.eval_episode_started_at = {}
+        torch.cuda.synchronize(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        evaluation_started_at = time.perf_counter()
 
         if self.config.EVAL.EPISODE_COUNT == -1:
             eps_to_eval = sum(self.envs.number_of_episodes)
@@ -590,6 +621,8 @@ class RLTrainer(BaseVLNCETrainer):
         while len(self.stat_eps) < eps_to_eval:
             self.rollout('eval')
         self.envs.close()
+        torch.cuda.synchronize(self.device)
+        evaluation_elapsed_ms = (time.perf_counter() - evaluation_started_at) * 1000.0
 
         if self.world_size > 1:
             distr.barrier()
@@ -620,6 +653,22 @@ class RLTrainer(BaseVLNCETrainer):
         with open(fname, "w") as f:
             json.dump(self.stat_eps, f, indent=2)
 
+        telemetry_fname = os.path.join(
+            self.config.RESULTS_DIR,
+            f"telemetry_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
+        )
+        cuda_memory = {
+            "allocated_mib": torch.cuda.memory_allocated(self.device) / 2 ** 20,
+            "reserved_mib": torch.cuda.memory_reserved(self.device) / 2 ** 20,
+            "peak_allocated_mib": torch.cuda.max_memory_allocated(self.device) / 2 ** 20,
+            "peak_reserved_mib": torch.cuda.max_memory_reserved(self.device) / 2 ** 20,
+        }
+        self.eval_telemetry.write(
+            telemetry_fname,
+            evaluation_elapsed_ms=evaluation_elapsed_ms,
+            cuda_memory=cuda_memory,
+        )
+
         if self.local_rank < 1:
             if self.config.EVAL.SAVE_RESULTS:
                 fname = os.path.join(
@@ -630,6 +679,7 @@ class RLTrainer(BaseVLNCETrainer):
                     json.dump(aggregated_states, f, indent=2)
 
             logger.info(f"Episodes evaluated: {total}")
+            logger.info(f"Evaluation telemetry: {telemetry_fname}")
             checkpoint_num = checkpoint_index + 1
             for k, v in aggregated_states.items():
                 logger.info(f"Average episode {k}: {v:.6f}")
@@ -778,6 +828,15 @@ class RLTrainer(BaseVLNCETrainer):
                             if ep.episode_id in self.stat_eps]    
             self.envs, batch = self._pause_envs(self.envs, batch, env_to_pause)
             if self.envs.num_envs == 0: return
+            for episode in self.envs.current_episodes():
+                episode_key = str(episode.episode_id)
+                self.eval_telemetry.start_episode(
+                    episode_id=episode_key,
+                    scene_id=episode.scene_id,
+                    trajectory_id=getattr(episode, 'trajectory_id', None),
+                )
+                if episode_key not in self.eval_episode_started_at:
+                    self.eval_episode_started_at[episode_key] = time.perf_counter()
         if mode == 'infer':
             env_to_pause = [i for i, ep in enumerate(self.envs.current_episodes()) 
                             if ep.episode_id in self.path_eps]    
@@ -815,11 +874,20 @@ class RLTrainer(BaseVLNCETrainer):
             total_actions += self.envs.num_envs
             txt_masks = all_txt_masks[not_done_index]
             txt_embeds = all_txt_embeds[not_done_index]
+
+            if mode == 'eval':
+                decision_episode_ids = [
+                    str(episode.episode_id)
+                    for episode in self.envs.current_episodes()
+                ]
+                torch.cuda.synchronize(self.device)
+                decision_started_at = time.perf_counter()
             
             # cand waypoint prediction
             wp_outputs = self.policy.net(
                 mode = "waypoint",
                 waypoint_predictor = self.waypoint_predictor,
+                waypoint_provider = self.eval_waypoint_provider if mode == 'eval' else None,
                 observations = batch,
                 in_train = (mode == 'train' and self.config.IL.waypoint_aug),
             )
@@ -871,6 +939,15 @@ class RLTrainer(BaseVLNCETrainer):
             })
             no_vp_left = nav_inputs.pop('no_vp_left')
             nav_outs = self.policy.net(**nav_inputs)
+            if mode == 'eval':
+                torch.cuda.synchronize(self.device)
+                decision_elapsed_ms = (
+                    time.perf_counter() - decision_started_at
+                ) * 1000.0
+                for episode_id in decision_episode_ids:
+                    self.eval_telemetry.record_decision(
+                        episode_id, decision_elapsed_ms
+                    )
             nav_logits = nav_outs['global_logits']
             nav_probs = F.softmax(nav_logits, 1)
             for i, gmap in enumerate(self.gmaps):
@@ -999,6 +1076,17 @@ class RLTrainer(BaseVLNCETrainer):
                     metric['sdtw'] = metric['ndtw'] * metric['success']
                     metric['ghost_cnt'] = self.gmaps[i].ghost_cnt
                     self.stat_eps[ep_id] = metric
+                    episode_key = str(ep_id)
+                    self.eval_telemetry.finish_episode(
+                        episode_id=episode_key,
+                        elapsed_ms=(
+                            time.perf_counter()
+                            - self.eval_episode_started_at[episode_key]
+                        ) * 1000.0,
+                        trajectory=pred_path.astype(float).tolist(),
+                        distances_to_goal=distances.astype(float).tolist(),
+                        metrics={key: float(value) for key, value in metric.items()},
+                    )
                     self.pbar.update()
 
             # record path

@@ -136,6 +136,8 @@ _C.MODEL.policy_name = "CMAPolicy"  # or "Seq2SeqPolicy"
 _C.MODEL.ablate_depth = False
 _C.MODEL.ablate_rgb = False
 _C.MODEL.ablate_instruction = False
+_C.MODEL.WAYPOINT_PROVIDER = "original_etp"
+_C.MODEL.MID360_CONFIG_PATH = "configs/mid360_waypoint.yaml"
 
 _C.MODEL.INSTRUCTION_ENCODER = CN()
 _C.MODEL.INSTRUCTION_ENCODER.sensor_uuid = "instruction"
