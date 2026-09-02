@@ -20,6 +20,16 @@ class MID360GeometryConfigTest(unittest.TestCase):
         self.assertEqual(config.angular_bins, 120)
         self.assertEqual(config.distance_bins, 12)
 
+    def test_optional_candidate_cap_must_be_a_valid_etp_bin(self):
+        values = self.load_values()
+        values["maximum_candidate_distance_m"] = 0.75
+        self.assertEqual(
+            MID360GeometryConfig(values).maximum_candidate_distance_m, 0.75
+        )
+        values["maximum_candidate_distance_m"] = 0.8
+        with self.assertRaisesRegex(ValueError, "ETP distance bin"):
+            MID360GeometryConfig(values)
+
     def test_sensor_range_must_cover_candidate_footprint_extent(self):
         invalid = copy.deepcopy(self.load_values())
         invalid["maximum_range_m"] = invalid["maximum_distance_m"]

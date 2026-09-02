@@ -77,6 +77,9 @@ class MID360GeometryConfig(object):
         self.values = dict(values)
         for key, value in self.values.items():
             setattr(self, key, value)
+        self.maximum_candidate_distance_m = self.values.get(
+            "maximum_candidate_distance_m", self.maximum_distance_m
+        )
         contracted_range = self.distance_bins * self.distance_step_m
         if abs(contracted_range - self.maximum_distance_m) > 1e-6:
             raise ValueError("distance bins and maximum distance disagree")
@@ -84,6 +87,15 @@ class MID360GeometryConfig(object):
             raise ValueError("ETP geometry contract requires a 120x12 score map")
         if self.distance_step_m <= 0 or self.maximum_distance_m <= 0:
             raise ValueError("candidate distance parameters must be positive")
+        if (
+            self.maximum_candidate_distance_m <= 0
+            or self.maximum_candidate_distance_m > self.maximum_distance_m
+            or abs(
+                self.maximum_candidate_distance_m / self.distance_step_m
+                - round(self.maximum_candidate_distance_m / self.distance_step_m)
+            ) > 1e-6
+        ):
+            raise ValueError("maximum_candidate_distance_m must be an ETP distance bin in range")
         if self.maximum_candidates < 1:
             raise ValueError("maximum_candidates must be positive")
         if self.depth_pixel_stride < 1:
@@ -210,8 +222,13 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             )
             occupancy_traversability_ms = (time.perf_counter() - started) * 1000.0
             started = time.perf_counter()
+            score = traversability.score.copy()
+            maximum_bin = int(round(
+                self.config.maximum_candidate_distance_m / self.config.distance_step_m
+            ))
+            score[:, maximum_bin:] = -np.inf
             angle_indexes, distance_indexes = select_geometry_candidates(
-                traversability.score,
+                score,
                 max_candidates=self.config.maximum_candidates,
             )
             candidate_construction_ms = (time.perf_counter() - started) * 1000.0
