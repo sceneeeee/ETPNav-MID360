@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 import unittest
 
 import yaml
@@ -29,6 +30,21 @@ class MID360GeometryConfigTest(unittest.TestCase):
         values["maximum_candidate_distance_m"] = 0.8
         with self.assertRaisesRegex(ValueError, "ETP distance bin"):
             MID360GeometryConfig(values)
+
+    def test_mru_config_changes_only_the_fixed_radial_utility_selector(self):
+        baseline = self.load_values()
+        mru_path = Path(default_mid360_config_path()).with_name(
+            "mid360_waypoint_mru.yaml"
+        )
+        with mru_path.open("r") as handle:
+            mru = yaml.safe_load(handle)
+
+        self.assertEqual(mru.pop("radial_utility"), "mru")
+        self.assertNotIn("maximum_candidate_distance_m", mru)
+        self.assertEqual(mru, baseline)
+        self.assertEqual(MID360GeometryConfig({
+            **baseline, "radial_utility": "mru"
+        }).radial_utility, "mru")
 
     def test_sensor_range_must_cover_candidate_footprint_extent(self):
         invalid = copy.deepcopy(self.load_values())

@@ -15,7 +15,6 @@ from vlnce_baselines.perception.local_traversability import (
     TraversabilityConfig,
     compute_local_traversability,
 )
-from vlnce_baselines.waypoint_pred.utils import nms
 from vlnce_baselines.waypoint_provider.base import WaypointProvider
 from vlnce_baselines.waypoint_provider.original_etp import (
     construct_waypoint_output,
@@ -23,24 +22,130 @@ from vlnce_baselines.waypoint_provider.original_etp import (
 )
 
 
-def select_geometry_candidates(score, max_candidates=5):
-    """Apply the original ETP circular NMS contract to a geometry score."""
-    score_tensor = torch.from_numpy(np.asarray(score, dtype=np.float32))
-    if score_tensor.shape != (120, 12):
+GEOMETRY_ANGLE_BINS = 120
+GEOMETRY_RADIAL_BINS = 12
+# Preserve the generic NMS call's sigma=(7, 5) axis order: x is radial
+# (columns) and y is angle (rows).
+GEOMETRY_NMS_RADIAL_SIGMA = 7
+GEOMETRY_NMS_ANGULAR_SIGMA = 5
+GEOMETRY_RADIAL_UTILITY_V0_LINEAR = "v0_linear"
+GEOMETRY_RADIAL_UTILITY_MRU = "mru"
+GMIN_EXTRACTION = "gmin_coverage_v0"
+
+
+def gmin_observation_availability(observations, config):
+    """Validate depth input, then test the frontend's stride-sampled evidence.
+
+    Distant valid surfaces count even when no local obstacle points survive.
+    Invalid samples anywhere in a view fail before visual encoding.
+    """
+    expected = ["depth" if a == 0 else "depth_{}".format(a)
+                for a in range(0, 360, 30)]
+    actual = [key for key in observations if "depth" in key]
+    if set(actual) != set(expected):
+        raise ValueError("G-Min requires all twelve expected depth views")
+    shape = tuple(observations["depth"].shape)
+    if len(shape) != 4 or shape[-1] != 1 or min(shape[:3]) < 1:
+        raise ValueError("G-Min depth shape must be BxHxWx1 with nonempty axes")
+    if "rgb" not in observations or observations["rgb"].shape[0] != shape[0]:
+        raise ValueError("G-Min RGB/depth batch shapes disagree")
+    counts = np.zeros(shape[0], dtype=np.int64)
+    for key in expected:
+        value = observations[key]
+        if tuple(value.shape) != shape:
+            raise ValueError("G-Min depth view shapes must match")
+        depth = value.detach().cpu().numpy()
+        if not np.isfinite(depth).all():
+            raise ValueError("G-Min depth must contain only finite values")
+        if np.any(depth < 0) or np.any(depth > 1):
+            raise ValueError("G-Min normalized depth must be in [0,1]")
+        sampled = depth[:, ::config.depth_pixel_stride,
+                        ::config.depth_pixel_stride, 0]
+        metric = sampled * (config.policy_depth_maximum_m
+                            - config.policy_depth_minimum_m)
+        metric = metric + config.policy_depth_minimum_m
+        counts += (metric > config.minimum_range_m).sum(axis=(1, 2))
+    return [{"available": bool(count),
+             "reason": ("sampled_depth_above_minimum_range" if count else
+                        "no_sampled_depth_above_minimum_range"),
+             "sampled_depth_above_minimum_count": int(count)} for count in counts]
+
+
+def _synchronize_observation_device(observations):
+    value = observations["depth"]
+    if value.is_cuda:
+        torch.cuda.synchronize(value.device)
+
+
+def apply_radial_utility(traversability_score, radial_utility):
+    """Map Geometry V0 traversability to its pre-NMS radial score.
+
+    Geometry V0 establishes a prefix of positive traversable bins and exact
+    zeros for blocked bins.  MRU preserves that prefix semantics while making
+    the sole controlled scoring change ``x * exp(1 - x)``, where
+    ``x = 2d / 3``.  In particular, the valid 3.0 m bin remains positive; this
+    is a utility curve, never a candidate-distance cutoff.
+    """
+    score = np.asarray(traversability_score, dtype=np.float32)
+    if score.shape != (GEOMETRY_ANGLE_BINS, GEOMETRY_RADIAL_BINS):
         raise ValueError("geometry score must have shape 120x12")
-    wrapped = torch.cat(
-        (score_tensor[-1:, :], score_tensor, score_tensor[:1, :]), dim=0
+    if radial_utility == GEOMETRY_RADIAL_UTILITY_V0_LINEAR:
+        return score.copy()
+    if radial_utility != GEOMETRY_RADIAL_UTILITY_MRU:
+        raise ValueError("unknown Geometry radial utility: {}".format(radial_utility))
+
+    distances_m = (
+        np.arange(1, GEOMETRY_RADIAL_BINS + 1, dtype=np.float32) * 0.25
     )
-    selected = nms(
-        wrapped.unsqueeze(0).unsqueeze(0),
-        max_predictions=max_candidates,
-        sigma=(7.0, 5.0),
-    ).squeeze(0).squeeze(0)[1:-1, :]
-    indexes = selected.nonzero()
-    return (
-        indexes[:, 0].cpu().numpy().astype(np.int64),
-        indexes[:, 1].cpu().numpy().astype(np.int64),
-    )
+    x = 2.0 * distances_m / 3.0
+    utility = x * np.exp(1.0 - x)
+    # Positive source scores identify precisely the Geometry V0 traversable
+    # prefix.  Multiplication retains exact float zero for every blocked cell.
+    return np.where(score > 0.0, utility[None, :], 0.0).astype(np.float32)
+
+
+def select_geometry_candidates(score, max_candidates=5):
+    """Select Geometry V0 candidates with circular angle and bounded radius.
+
+    This deliberately does not change the generic ETP NMS implementation.
+    Heading is periodic, whereas the radial score axis is physical distance and
+    must terminate at bins zero and 11 rather than wrap between them.
+    """
+    score_tensor = torch.from_numpy(np.asarray(score, dtype=np.float32))
+    if score_tensor.shape != (GEOMETRY_ANGLE_BINS, GEOMETRY_RADIAL_BINS):
+        raise ValueError("geometry score must have shape 120x12")
+    remaining = score_tensor.clone()
+    selected = []
+    angle_grid = torch.arange(GEOMETRY_ANGLE_BINS).view(-1, 1)
+    radial_grid = torch.arange(GEOMETRY_RADIAL_BINS).view(1, -1)
+
+    for _ in range(max_candidates):
+        value, flat_index = torch.max(remaining.reshape(-1), dim=0)
+        # This matches generic NMS's externally visible behavior: zero and
+        # negative score cells never become waypoint candidates.
+        if not torch.isfinite(value) or value <= 0:
+            break
+        angle_index = int(flat_index.item() // GEOMETRY_RADIAL_BINS)
+        radial_index = int(flat_index.item() % GEOMETRY_RADIAL_BINS)
+        selected.append((angle_index, radial_index))
+
+        angular_difference = torch.abs(angle_grid - angle_index)
+        angular_difference = torch.min(
+            angular_difference, GEOMETRY_ANGLE_BINS - angular_difference
+        )
+        radial_difference = torch.abs(radial_grid - radial_index)
+        suppress = torch.logical_and(
+            angular_difference <= GEOMETRY_NMS_ANGULAR_SIGMA,
+            radial_difference <= GEOMETRY_NMS_RADIAL_SIGMA,
+        )
+        remaining[suppress] = -np.inf
+
+    if not selected:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    # Generic NMS returns ``selected.nonzero()``, whose row-major ordering is
+    # independent of greedy selection rank. Preserve that output contract.
+    indexes = np.asarray(sorted(selected), dtype=np.int64)
+    return indexes[:, 0], indexes[:, 1]
 
 
 class MID360GeometryConfig(object):
@@ -80,6 +185,26 @@ class MID360GeometryConfig(object):
         self.maximum_candidate_distance_m = self.values.get(
             "maximum_candidate_distance_m", self.maximum_distance_m
         )
+        self.radial_utility = self.values.get(
+            "radial_utility", GEOMETRY_RADIAL_UTILITY_V0_LINEAR
+        )
+        self.candidate_extraction = self.values.get("candidate_extraction", "bounded_nms")
+        if self.candidate_extraction not in ("bounded_nms", GMIN_EXTRACTION):
+            raise ValueError("unknown Geometry candidate_extraction")
+        if self.candidate_extraction == GMIN_EXTRACTION:
+            if (isinstance(self.maximum_candidates, bool)
+                    or not isinstance(self.maximum_candidates, int)
+                    or not 1 <= self.maximum_candidates <= 5):
+                raise ValueError("G-Min maximum_candidates must be an integer in 1..5")
+            if ("radial_utility" in values
+                    or "maximum_candidate_distance_m" in values
+                    or any("v1" in str(key).lower() for key in values)
+                    or "mode" in values):
+                raise ValueError("G-Min forbids radial utility, distance caps and V1 mode")
+            if not (np.isfinite(self.policy_depth_minimum_m)
+                    and np.isfinite(self.policy_depth_maximum_m)
+                    and 0 <= self.policy_depth_minimum_m < self.policy_depth_maximum_m):
+                raise ValueError("G-Min metric depth contract is invalid")
         contracted_range = self.distance_bins * self.distance_step_m
         if abs(contracted_range - self.maximum_distance_m) > 1e-6:
             raise ValueError("distance bins and maximum distance disagree")
@@ -98,6 +223,11 @@ class MID360GeometryConfig(object):
             raise ValueError("maximum_candidate_distance_m must be an ETP distance bin in range")
         if self.maximum_candidates < 1:
             raise ValueError("maximum_candidates must be positive")
+        if self.radial_utility not in (
+            GEOMETRY_RADIAL_UTILITY_V0_LINEAR,
+            GEOMETRY_RADIAL_UTILITY_MRU,
+        ):
+            raise ValueError("radial_utility must be v0_linear or mru")
         if self.depth_pixel_stride < 1:
             raise ValueError("depth_pixel_stride must be positive")
         if self.minimum_range_m < 0 or self.maximum_range_m <= self.minimum_range_m:
@@ -193,6 +323,13 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             raise ValueError(
                 "MID360GeometryWaypointProvider V0 is evaluation-only"
             )
+        is_gmin = self.config.candidate_extraction == GMIN_EXTRACTION
+        availability = None
+        if is_gmin:
+            _synchronize_observation_device(observations)
+            gate_started = time.perf_counter()
+            availability = gmin_observation_availability(observations, self.config)
+            availability_ms = (time.perf_counter() - gate_started) * 1000.0
         started = time.perf_counter()
         encoded = encode_panorama(
             observations=observations,
@@ -201,6 +338,8 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             rgb_pool=self.rgb_pool,
             depth_pool=self.depth_pool,
         )
+        if is_gmin:
+            _synchronize_observation_device(observations)
         visual_encoding_ms = (time.perf_counter() - started) * 1000.0
         batch_angle_indexes = []
         batch_distance_indexes = []
@@ -222,15 +361,25 @@ class MID360GeometryWaypointProvider(WaypointProvider):
             )
             occupancy_traversability_ms = (time.perf_counter() - started) * 1000.0
             started = time.perf_counter()
-            score = traversability.score.copy()
-            maximum_bin = int(round(
-                self.config.maximum_candidate_distance_m / self.config.distance_step_m
-            ))
-            score[:, maximum_bin:] = -np.inf
-            angle_indexes, distance_indexes = select_geometry_candidates(
-                score,
-                max_candidates=self.config.maximum_candidates,
-            )
+            if is_gmin:
+                from vlnce_baselines.perception.gmin_candidates import select_gmin_candidates
+                score = traversability.score > 0
+                # Availability gates extraction, not the shared geometry map.
+                mask = score if availability[batch_index]["available"] else np.zeros_like(score)
+                angle_indexes, distance_indexes = select_gmin_candidates(
+                    mask, max_candidates=self.config.maximum_candidates)
+            else:
+                score = apply_radial_utility(
+                    traversability.score, self.config.radial_utility
+                )
+                maximum_bin = int(round(
+                    self.config.maximum_candidate_distance_m / self.config.distance_step_m
+                ))
+                score[:, maximum_bin:] = -np.inf
+                angle_indexes, distance_indexes = select_geometry_candidates(
+                    score,
+                    max_candidates=self.config.maximum_candidates,
+                )
             candidate_construction_ms = (time.perf_counter() - started) * 1000.0
             batch_angle_indexes.append(torch.from_numpy(angle_indexes))
             batch_distance_indexes.append(torch.from_numpy(distance_indexes))
@@ -239,6 +388,11 @@ class MID360GeometryWaypointProvider(WaypointProvider):
                     "merged_pointcloud": merged_cloud,
                     "filtered_pointcloud": filtered_cloud,
                     "traversability": traversability,
+                    # This is the exact 120x12 input to Geometry V0 NMS. It is
+                    # retained in memory only; the evaluation driver may
+                    # opt-in to serialize selected decisions for diagnosis.
+                    # Never expose this to policy or candidate construction.
+                    "pre_nms_score": score,
                     "angle_indexes": angle_indexes,
                     "distance_indexes": distance_indexes,
                     "geometry_source": geometry.source,
@@ -252,6 +406,18 @@ class MID360GeometryWaypointProvider(WaypointProvider):
                 'occupancy_inflation_traversability': occupancy_traversability_ms,
                 'nms_candidate_construction': candidate_construction_ms,
             })
+            if is_gmin:
+                debug[-1].update({
+                    'candidate_extraction': GMIN_EXTRACTION,
+                    'observation_availability': availability[batch_index],
+                    'admissibility_count': int(score.sum()),
+                })
+                timings[-1].pop('nms_candidate_construction')
+                timings[-1].update({
+                    'gmin_extraction': candidate_construction_ms,
+                    'observation_availability': availability_ms,
+                    'geometry_frontend': pointcloud_ms + filter_ms + occupancy_traversability_ms,
+                })
         output = construct_waypoint_output(
             encoded=encoded,
             batch_angle_indexes=batch_angle_indexes,
