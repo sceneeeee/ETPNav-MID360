@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+source "${repo_root}/scripts/renderer_bootstrap.bash"
+etp_apply_known_good_renderer_environment
 
 episodes="${1:-1}"
 provider="${2:-original_etp}"
