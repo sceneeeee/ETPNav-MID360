@@ -254,6 +254,23 @@ class RLTrainer(BaseVLNCETrainer):
         provider_name = self.config.MODEL.WAYPOINT_PROVIDER
         if provider_name == 'original_etp':
             return None
+        if provider_name == 'mid360_geometry_v1':
+            from vlnce_baselines.waypoint_provider.mid360_geometry_v1 import (
+                MID360GeometryV1Config,
+                MID360GeometryV1WaypointProvider,
+            )
+            policy_net = self.policy.net.module if hasattr(self.policy.net, 'module') else self.policy.net
+            return MID360GeometryV1WaypointProvider(
+                rgb_encoder=policy_net.rgb_encoder,
+                depth_encoder=policy_net.depth_encoder,
+                rgb_pool=policy_net.space_pool_rgb,
+                depth_pool=policy_net.space_pool_depth,
+                pano_angle_features=policy_net.pano_angle_fts,
+                pano_image_indexes=policy_net.pano_img_idxes,
+                config=MID360GeometryV1Config.from_yaml(
+                    self.config.MODEL.MID360_V1_CONFIG_PATH
+                ),
+            )
         if provider_name != 'mid360_geometry':
             raise ValueError('unknown evaluation waypoint provider: {}'.format(provider_name))
 

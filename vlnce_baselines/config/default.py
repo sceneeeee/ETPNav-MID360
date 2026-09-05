@@ -140,6 +140,7 @@ _C.MODEL.ablate_rgb = False
 _C.MODEL.ablate_instruction = False
 _C.MODEL.WAYPOINT_PROVIDER = "original_etp"
 _C.MODEL.MID360_CONFIG_PATH = "configs/mid360_waypoint.yaml"
+_C.MODEL.MID360_V1_CONFIG_PATH = "configs/mid360_waypoint_v1.yaml"
 
 _C.MODEL.INSTRUCTION_ENCODER = CN()
 _C.MODEL.INSTRUCTION_ENCODER.sensor_uuid = "instruction"
