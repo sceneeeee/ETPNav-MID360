@@ -1109,6 +1109,8 @@ class RLTrainer(BaseVLNCETrainer):
                     selected_ghost = None
                     if not stop:
                         selected_ghost = str(nav_inputs['gmap_vp_ids'][i][action_index])
+                    planner_selected_vp = nav_inputs['gmap_vp_ids'][i][action_index]
+                    planner_ghost_position = gmap.ghost_aug_pos.get(planner_selected_vp)
                     trace_record = {
                         'step_index': int(stepk),
                         'decision_timestamp_monotonic_ms': time.perf_counter() * 1000.0,
