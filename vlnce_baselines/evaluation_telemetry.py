@@ -6,6 +6,28 @@ from collections import OrderedDict
 
 import numpy as np
 
+from vlnce_baselines.diagnostic_serialization import json_safe
+
+
+def serialize_waypoint_candidates(output, batch_index):
+    """Convert one raw provider output row to the telemetry representation.
+
+    This is deliberately a read-only conversion.  Keeping it outside the
+    trainer makes the raw-provider-to-JSON contract directly testable.
+    """
+    return [
+        {
+            "angle": float(angle),
+            "distance": float(distance),
+            "panorama_image_index": int(image_index),
+        }
+        for angle, distance, image_index in zip(
+            output["cand_angles"][batch_index],
+            output["cand_distances"][batch_index],
+            output["cand_img_idxes"][batch_index],
+        )
+    ]
+
 
 class EvaluationTelemetry(object):
     """Collect per-episode evidence without participating in policy decisions."""
@@ -106,5 +128,5 @@ class EvaluationTelemetry(object):
             os.makedirs(output_dir, exist_ok=True)
         report = self.report(evaluation_elapsed_ms, cuda_memory)
         with open(path, "w") as handle:
-            json.dump(report, handle, indent=2)
+            json.dump(json_safe(report), handle, indent=2)
             handle.write("\n")

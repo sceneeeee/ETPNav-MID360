@@ -33,6 +33,7 @@ _C.EVAL.EPISODE_IDS = []  # Optional exact evaluation subset; preserves order.
 _C.EVAL.LANGUAGES = ["en-US", "en-IN"]
 _C.EVAL.SAMPLE = False
 _C.EVAL.SAVE_RESULTS = True
+_C.EVAL.DETAILED_TELEMETRY = True
 _C.EVAL.EVAL_NONLEARNING = False
 _C.EVAL.NONLEARNING = CN()
 _C.EVAL.NONLEARNING.AGENT = "RandomAgent"

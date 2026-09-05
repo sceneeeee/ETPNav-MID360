@@ -5,10 +5,59 @@ import unittest
 
 import torch
 
-from vlnce_baselines.evaluation_telemetry import EvaluationTelemetry
+from vlnce_baselines.evaluation_telemetry import (
+    EvaluationTelemetry,
+    serialize_waypoint_candidates,
+)
+from vlnce_baselines.evaluation_sensor_diagnostics import (
+    require_valid_sensor_observations,
+)
 
 
 class EvaluationTelemetryTest(unittest.TestCase):
+    def test_sensor_guard_rejects_all_zero_rgb(self):
+        observations = {
+            "rgb": torch.zeros(1, 2, 2, 3, dtype=torch.uint8),
+            "depth": torch.ones(1, 2, 2, 1),
+        }
+        with self.assertRaisesRegex(RuntimeError, "RGB frames are zero"):
+            require_valid_sensor_observations(observations, batch_index=0)
+
+    def test_sensor_guard_rejects_all_invalid_depth(self):
+        observations = {
+            "rgb": torch.ones(1, 2, 2, 3, dtype=torch.uint8),
+            "depth": torch.zeros(1, 2, 2, 1),
+        }
+        with self.assertRaisesRegex(RuntimeError, "Depth frames are zero"):
+            require_valid_sensor_observations(observations, batch_index=0)
+
+    def test_sensor_guard_accepts_valid_observations(self):
+        observations = {
+            "rgb": torch.ones(1, 2, 2, 3, dtype=torch.uint8),
+            "depth": torch.ones(1, 2, 2, 1),
+        }
+        self.assertIn("rgb", require_valid_sensor_observations(observations, batch_index=0))
+
+    def test_serialized_candidates_match_raw_provider_output(self):
+        """Unequal distances catch accidental broadcast/indexing errors."""
+        raw_output = {
+            "cand_angles": [[0.0, 0.5, 1.0, 1.5]],
+            "cand_distances": [[0.5, 0.75, 1.25, 1.75]],
+            "cand_img_idxes": [torch.tensor([0, 2, 5, 9])],
+        }
+
+        serialized = serialize_waypoint_candidates(raw_output, 0)
+
+        self.assertEqual(
+            serialized,
+            [
+                {"angle": 0.0, "distance": 0.5, "panorama_image_index": 0},
+                {"angle": 0.5, "distance": 0.75, "panorama_image_index": 2},
+                {"angle": 1.0, "distance": 1.25, "panorama_image_index": 5},
+                {"angle": 1.5, "distance": 1.75, "panorama_image_index": 9},
+            ],
+        )
+
     def test_trace_collection_does_not_change_fixed_policy_output(self):
         """Telemetry receives copied scalars, never the policy tensors."""
         output = {

@@ -2,6 +2,7 @@ import gc
 import os
 import sys
 import random
+import resource
 from collections import defaultdict
 from typing import Dict, List
 import jsonlines
@@ -34,7 +35,15 @@ from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST, heading_from_quaternion
-from vlnce_baselines.evaluation_telemetry import EvaluationTelemetry
+from vlnce_baselines.evaluation_telemetry import (
+    EvaluationTelemetry,
+    serialize_waypoint_candidates,
+)
+from vlnce_baselines.evaluation_sensor_diagnostics import (
+    require_valid_sensor_observations,
+    summarize_observations,
+    write_forensic_layers,
+)
 from vlnce_baselines.utils import reduce_loss
 
 from .utils import get_camera_orientations12
@@ -266,17 +275,7 @@ class RLTrainer(BaseVLNCETrainer):
 
     @staticmethod
     def _waypoint_candidates(output, index):
-        return [
-            {
-                'angle': float(angle),
-                'distance': float(distance),
-                'panorama_image_index': int(image_index),
-            }
-            for angle, distance, image_index in zip(
-                output['cand_angles'][index], output['cand_distances'][index],
-                output['cand_img_idxes'][index],
-            )
-        ]
+        return serialize_waypoint_candidates(output, index)
 
     def _teacher_action(self, batch_angles, batch_distances, candidate_lengths):
         if self.config.MODEL.task_type == 'r2r':
@@ -553,8 +552,6 @@ class RLTrainer(BaseVLNCETrainer):
         if self.local_rank < 1:
             logger.info(f"checkpoint_path: {checkpoint_path}")
         self.config.defrost()
-        self.config.TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.SHUFFLE = False
-        self.config.TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_STEPS = -1
         self.config.IL.ckpt_to_load = checkpoint_path
         if self.config.VIDEO_OPTION:
             self.config.TASK_CONFIG.TASK.MEASUREMENTS.append("TOP_DOWN_MAP_VLNCE")
@@ -626,9 +623,24 @@ class RLTrainer(BaseVLNCETrainer):
         self.waypoint_predictor.eval()
         self.eval_waypoint_provider = self._evaluation_waypoint_provider()
 
+        # Keep the in-memory trace available to the opt-in forensic runner even
+        # when normal detailed-telemetry file emission is disabled.
         self.eval_telemetry = EvaluationTelemetry()
         self.eval_episode_started_at = {}
         self.eval_collision_counts = {}
+        self.eval_sensor_guard_checked = False
+        # Scalar-only startup validity evidence for formal evaluation runs.
+        # This never reaches the policy or serializes sensor arrays.
+        self.eval_sensor_validity = {}
+        # Opt-in raw Geometry-V0 score capture.  The allow-list and decision
+        # bound keep formal runs unchanged and make a diagnostic run bounded.
+        capture_ids = os.environ.get('ETP_GEOMETRY_SCORE_CAPTURE_EPISODE_IDS', '')
+        self.eval_geometry_score_capture_ids = {
+            item.strip() for item in capture_ids.split(',') if item.strip()
+        }
+        self.eval_geometry_score_capture_max_decisions = int(
+            os.environ.get('ETP_GEOMETRY_SCORE_CAPTURE_MAX_DECISIONS', '0')
+        )
         torch.cuda.synchronize(self.device)
         torch.cuda.reset_peak_memory_stats(self.device)
         evaluation_started_at = time.perf_counter()
@@ -679,17 +691,47 @@ class RLTrainer(BaseVLNCETrainer):
             self.config.RESULTS_DIR,
             f"telemetry_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
         )
+        sensor_validity_fname = os.path.join(
+            self.config.RESULTS_DIR,
+            f"sensor_validity_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
+        )
         cuda_memory = {
             "allocated_mib": torch.cuda.memory_allocated(self.device) / 2 ** 20,
             "reserved_mib": torch.cuda.memory_reserved(self.device) / 2 ** 20,
             "peak_allocated_mib": torch.cuda.max_memory_allocated(self.device) / 2 ** 20,
             "peak_reserved_mib": torch.cuda.max_memory_reserved(self.device) / 2 ** 20,
+            "process_peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+            "waypoint_predictor_resident": all(p.is_cuda for p in self.waypoint_predictor.parameters()),
+            "waypoint_predictor_model_memory_released": "NONE",
         }
-        self.eval_telemetry.write(
-            telemetry_fname,
-            evaluation_elapsed_ms=evaluation_elapsed_ms,
-            cuda_memory=cuda_memory,
-        )
+        # Linux host memory is observational and never enters model inputs.
+        for path, fields, prefix in (
+            ('/proc/self/status', ('VmRSS', 'VmHWM'), 'process_'),
+            ('/proc/meminfo', ('MemTotal', 'MemAvailable'), 'system_'),
+        ):
+            try:
+                with open(path) as handle:
+                    for line in handle:
+                        name = line.split(':', 1)[0]
+                        if name in fields:
+                            cuda_memory[prefix + name + '_mib'] = int(line.split()[1]) / 1024.0
+            except OSError:
+                pass
+        if self.config.EVAL.DETAILED_TELEMETRY:
+            self.eval_telemetry.write(
+                telemetry_fname,
+                evaluation_elapsed_ms=evaluation_elapsed_ms,
+                cuda_memory=cuda_memory,
+            )
+        with open(sensor_validity_fname, "w") as f:
+            json.dump(self.eval_sensor_validity, f, indent=2)
+        forensic_trace = os.environ.get('ETP_ORIGINAL_FORENSICS_TRACE_PATH')
+        if forensic_trace:
+            self.eval_telemetry.write(
+                forensic_trace,
+                evaluation_elapsed_ms=evaluation_elapsed_ms,
+                cuda_memory=cuda_memory,
+            )
 
         if self.local_rank < 1:
             if self.config.EVAL.SAVE_RESULTS:
@@ -838,12 +880,39 @@ class RLTrainer(BaseVLNCETrainer):
 
         self.envs.resume_all()
         observations = self.envs.reset()
+        # Evaluation-only fail-fast guard at the closest seam to Habitat-Sim.
+        # It intentionally runs before batching, transforms, and policy code.
+        raw_sensor_summary = None
+        if mode == 'eval':
+            # Validate every episode reset before batching or policy inference.
+            # The first failure necessarily aborts the complete formal run.
+            current_episodes = self.envs.current_episodes()
+            if len(current_episodes) != len(observations):
+                raise RuntimeError("evaluation episode/observation count mismatch")
+            for index, (episode, observation) in enumerate(zip(current_episodes, observations)):
+                summary = require_valid_sensor_observations(observation)
+                self.eval_sensor_validity[str(episode.episode_id)] = {
+                    "scene_id": episode.scene_id,
+                    "rgb_valid": True,
+                    "depth_valid": True,
+                }
+                if index == 0:
+                    raw_sensor_summary = summary
+            self.eval_sensor_guard_checked = True
         instr_max_len = self.config.IL.max_text_len # r2r 80, rxr 200
         instr_pad_id = 1 if self.config.MODEL.task_type == 'rxr' else 0
         observations = extract_instruction_tokens(observations, self.config.TASK_CONFIG.TASK.INSTRUCTION_SENSOR_UUID,
                                                   max_length=instr_max_len, pad_id=instr_pad_id)
         batch = batch_obs(observations, self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)
+        if mode == 'eval' and raw_sensor_summary is not None:
+            forensic_path = os.environ.get('ETP_ORIGINAL_FORENSICS_RAW_PATH')
+            if forensic_path:
+                write_forensic_layers(
+                    forensic_path,
+                    raw_sensor_summary,
+                    summarize_observations(batch, batch_index=0),
+                )
         
         if mode == 'eval':
             env_to_pause = [i for i, ep in enumerate(self.envs.current_episodes()) 
@@ -949,10 +1018,25 @@ class RLTrainer(BaseVLNCETrainer):
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]
                 cand_embeds = pano_embeds[i][vp_inputs['nav_types'][i]==1]
+                if mode == 'eval':
+                    graph_before = {
+                        'nodes': {vp: np.asarray(pos).tolist() for vp, pos in self.gmaps[i].node_pos.items()},
+                        'ghosts': {vp: np.asarray(pos).tolist() for vp, pos in self.gmaps[i].ghost_mean_pos.items()},
+                        'ghost_cnt': int(self.gmaps[i].ghost_cnt),
+                    }
                 self.gmaps[i].update_graph(prev_vp[i], stepk+1,
                                            cur_vp[i], cur_pos[i], cur_embeds,
                                            cand_vp[i], cand_pos[i], cand_embeds,
                                            cand_real_pos[i])
+                if mode == 'eval':
+                    self.gmaps[i]._evaluation_insertion_trace = {
+                        'before': graph_before,
+                        'candidate_positions': np.asarray(cand_pos[i]).tolist(),
+                        'candidate_vp_ids': list(cand_vp[i]),
+                        'loc_noise': float(self.config.IL.loc_noise),
+                        'ghosts_after': {vp: np.asarray(pos).tolist() for vp, pos in self.gmaps[i].ghost_aug_pos.items()},
+                        'new_ghost_count': int(self.gmaps[i].ghost_cnt) - graph_before['ghost_cnt'],
+                    }
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori)
             nav_inputs.update({
@@ -1021,17 +1105,54 @@ class RLTrainer(BaseVLNCETrainer):
                         'selected_waypoint': None,
                         'selected_graph_node_or_ghost_id': selected_ghost,
                         'stop': stop,
+                        'planner_action_index': action_index,
+                        'planner_stop': bool(action_index == 0),
+                        'step_limit': bool(stepk == self.max_len - 1),
+                        'no_ghosts': bool(no_vp_left[i]),
+                        'stop_vp': None,
+                        'stop_pos': None,
+                        'selected_ghost_id': (str(planner_selected_vp) if planner_ghost_position is not None else None),
+                        'selected_ghost_position': (np.asarray(planner_ghost_position).tolist() if planner_ghost_position is not None else None),
+                        'execution_front_node': None,
+                        'execution_front_position': None,
+                        'current_node': cur_vp[i],
+                        'graph_edge_count': int(gmap.graph_nx.number_of_edges()),
+                        'graph_insertion': gmap._evaluation_insertion_trace,
                         'visited_node_count': len(gmap.node_pos),
                         'ghost_node_count': len(gmap.ghost_aug_pos),
                     }
                     if self.eval_waypoint_provider is not None:
                         trace_record['geometry_timing_ms'] = self.eval_waypoint_provider.last_timings[i]
+                        provider_debug = self.eval_waypoint_provider.last_debug[i]
+                        if provider_debug.get('candidate_extraction') == 'gmin_coverage_v0':
+                            trace_record['gmin'] = {
+                                'candidate_exact_cells': np.stack((provider_debug['angle_indexes'], provider_debug['distance_indexes']), axis=1).tolist(),
+                                'admissibility_count': provider_debug['admissibility_count'],
+                                'observation_availability': provider_debug['observation_availability'],
+                            }
+                        if (
+                            str(decision_episode_ids[i]) in self.eval_geometry_score_capture_ids
+                            and stepk < self.eval_geometry_score_capture_max_decisions
+                        ):
+                            provider_debug = self.eval_waypoint_provider.last_debug[i]
+                            if 'pre_nms_score' in provider_debug:
+                                raw_score = provider_debug['pre_nms_score']
+                                if raw_score.shape != (120, 12):
+                                    raise RuntimeError('Geometry pre-NMS score must be 120x12')
+                                # List conversion is read-only and happens after
+                                # policy inference/action selection.
+                                trace_record['geometry_pre_nms_score'] = raw_score.tolist()
                 if cpu_a_t[i] == 0 or stepk == self.max_len - 1 or no_vp_left[i]:
                     # stop at node with max stop_prob
                     vp_stop_scores = [(vp, stop_score) for vp, stop_score in gmap.node_stop_scores.items()]
                     stop_scores = [s[1] for s in vp_stop_scores]
                     stop_vp = vp_stop_scores[np.argmax(stop_scores)][0]
                     stop_pos = gmap.node_pos[stop_vp]
+                    if trace_record is not None:
+                        trace_record['stop_vp'] = stop_vp
+                        trace_record['stop_pos'] = np.asarray(stop_pos).tolist()
+                        trace_record['execution_front_node'] = stop_vp
+                        trace_record['execution_front_position'] = np.asarray(stop_pos).tolist()
                     if self.config.IL.back_algo == 'control':
                         back_path = [(vp, gmap.node_pos[vp]) for vp in gmap.shortest_path[cur_vp[i]][stop_vp]]
                         back_path = back_path[1:]
@@ -1060,6 +1181,9 @@ class RLTrainer(BaseVLNCETrainer):
                     _, front_vp = gmap.front_to_ghost_dist(ghost_vp)
                     front_pos = gmap.node_pos[front_vp]
                     if trace_record is not None:
+                        trace_record['selected_ghost_position'] = np.asarray(ghost_pos).tolist()
+                        trace_record['execution_front_node'] = front_vp
+                        trace_record['execution_front_position'] = np.asarray(front_pos).tolist()
                         candidate_index = None
                         for j, position in enumerate(cand_pos[i]):
                             if np.linalg.norm(np.asarray(position) - ghost_pos) < 1e-5:

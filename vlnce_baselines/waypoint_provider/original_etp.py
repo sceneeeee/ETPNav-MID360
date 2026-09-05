@@ -1,5 +1,6 @@
 from copy import deepcopy
 import math
+import os
 
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ from vlnce_baselines.models.utils import angle_feature_torch
 from vlnce_baselines.waypoint_pred.utils import nms
 from vlnce_baselines.waypoint_provider.base import WaypointProvider
 from vlnce_baselines.waypoint_provider.types import WaypointOutput
+from vlnce_baselines.original_forensics import capture as capture_forensics
 
 
 NUM_ANGLES = 120
@@ -241,10 +243,15 @@ class OriginalETPWaypointProvider(WaypointProvider):
                 candidate_map[index].nonzero()[:, 1]
                 for index in range(encoded.batch_size)
             ]
-        return construct_waypoint_output(
+        output = construct_waypoint_output(
             encoded=encoded,
             batch_angle_indexes=angle_indexes,
             batch_distance_indexes=distance_indexes,
             pano_angle_features=self.pano_angle_features,
             pano_image_indexes=self.pano_image_indexes,
         )
+        # The manual forensic runner supplies this path.  Capture is opt-in and
+        # runs before evaluator telemetry serializes candidates.
+        capture_forensics(os.environ.get("ETP_ORIGINAL_FORENSICS_RAW_PATH"),
+                          observations, logits, output, DISTANCE_STEP_M)
+        return output
