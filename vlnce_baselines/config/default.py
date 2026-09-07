@@ -139,6 +139,7 @@ _C.MODEL.ablate_depth = False
 _C.MODEL.ablate_rgb = False
 _C.MODEL.ablate_instruction = False
 _C.MODEL.WAYPOINT_PROVIDER = "original_etp"
+_C.MODEL.MID360_SPARSE_DEPTH_CONFIG_PATH = "configs/mid360_sparse_depth_zero_shot.yaml"
 _C.MODEL.MID360_CONFIG_PATH = "configs/mid360_waypoint.yaml"
 _C.MODEL.MID360_V1_CONFIG_PATH = "configs/mid360_waypoint_v1.yaml"
 

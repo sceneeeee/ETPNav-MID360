@@ -254,6 +254,24 @@ class RLTrainer(BaseVLNCETrainer):
         provider_name = self.config.MODEL.WAYPOINT_PROVIDER
         if provider_name == 'original_etp':
             return None
+        if provider_name == 'mid360_sparse_depth_etp':
+            from vlnce_baselines.perception.mid360_sparse_depth import MID360SparseDepthConfig
+            from vlnce_baselines.waypoint_provider.mid360_sparse_depth_etp import MID360SparseDepthETPWaypointProvider
+
+            sparse_config = MID360SparseDepthConfig.from_yaml(
+                self.config.MODEL.MID360_SPARSE_DEPTH_CONFIG_PATH)
+            sparse_config.validate_runtime(self.config)
+            policy_net = self.policy.net.module if hasattr(self.policy.net, 'module') else self.policy.net
+            return MID360SparseDepthETPWaypointProvider(
+                config=sparse_config,
+                rgb_encoder=policy_net.rgb_encoder,
+                depth_encoder=policy_net.depth_encoder,
+                rgb_pool=policy_net.space_pool_rgb,
+                depth_pool=policy_net.space_pool_depth,
+                waypoint_predictor=self.waypoint_predictor,
+                pano_angle_features=policy_net.pano_angle_fts,
+                pano_image_indexes=policy_net.pano_img_idxes,
+            )
         if provider_name == 'mid360_geometry_v1':
             from vlnce_baselines.waypoint_provider.mid360_geometry_v1 import (
                 MID360GeometryV1Config,
@@ -487,6 +505,8 @@ class RLTrainer(BaseVLNCETrainer):
         return envs, batch
 
     def train(self):
+        if self.config.MODEL.WAYPOINT_PROVIDER == 'mid360_sparse_depth_etp':
+            raise RuntimeError('MID360-like sparse-depth control is evaluation only; no training')
         self._set_config()
         if self.config.MODEL.task_type == 'rxr':
             self.gt_data = {}
@@ -1140,7 +1160,9 @@ class RLTrainer(BaseVLNCETrainer):
                         'visited_node_count': len(gmap.node_pos),
                         'ghost_node_count': len(gmap.ghost_aug_pos),
                     }
-                    if self.eval_waypoint_provider is not None:
+                    if hasattr(self.eval_waypoint_provider, 'last_sparse_depth_diagnostics'):
+                        trace_record['sparse_depth'] = self.eval_waypoint_provider.last_sparse_depth_diagnostics[i]
+                    elif self.eval_waypoint_provider is not None:
                         trace_record['geometry_timing_ms'] = self.eval_waypoint_provider.last_timings[i]
                         provider_debug = self.eval_waypoint_provider.last_debug[i]
                         if provider_debug.get('candidate_extraction') == 'gmin_coverage_v0':
