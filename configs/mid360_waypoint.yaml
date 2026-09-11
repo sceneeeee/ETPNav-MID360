@@ -1,0 +1,29 @@
+# Engineering approximation for architecture validation only.
+# This does not simulate the Livox MID360 non-repetitive scan pattern.
+angular_bins: 120
+distance_bins: 12
+distance_step_m: 0.25
+maximum_distance_m: 3.0
+maximum_candidates: 5
+
+camera_height_m: 1.25
+horizontal_fov_degrees: 90.0
+policy_depth_minimum_m: 0.0
+policy_depth_maximum_m: 10.0
+depth_pixel_stride: 4
+minimum_range_m: 0.10
+maximum_range_m: 3.5
+vertical_fov_min_degrees: -60.0
+vertical_fov_max_degrees: 60.0
+azimuth_bin_degrees: 1.0
+elevation_bin_degrees: 1.0
+voxel_size_m: 0.05
+
+# No verified real-robot footprint was found in the current workspace. This
+# matches Habitat-Lab 0.1.7's default test agent and is not a real-robot value.
+robot_radius_m: 0.10
+robot_radius_status: HABITAT_DEFAULT_AGENT_TEST_ONLY
+clearance_margin_m: 0.02
+obstacle_height_min_m: 0.08
+obstacle_height_max_m: 1.60
+grid_resolution_m: 0.05

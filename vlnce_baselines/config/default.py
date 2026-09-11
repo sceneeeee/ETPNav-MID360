@@ -29,9 +29,11 @@ _C.EVAL = CN()
 # The split to evaluate on
 _C.EVAL.SPLIT = "val_seen"
 _C.EVAL.EPISODE_COUNT = -1
+_C.EVAL.EPISODE_IDS = []  # Optional exact evaluation subset; preserves order.
 _C.EVAL.LANGUAGES = ["en-US", "en-IN"]
 _C.EVAL.SAMPLE = False
 _C.EVAL.SAVE_RESULTS = True
+_C.EVAL.DETAILED_TELEMETRY = True
 _C.EVAL.EVAL_NONLEARNING = False
 _C.EVAL.NONLEARNING = CN()
 _C.EVAL.NONLEARNING.AGENT = "RandomAgent"
@@ -136,6 +138,10 @@ _C.MODEL.policy_name = "CMAPolicy"  # or "Seq2SeqPolicy"
 _C.MODEL.ablate_depth = False
 _C.MODEL.ablate_rgb = False
 _C.MODEL.ablate_instruction = False
+_C.MODEL.WAYPOINT_PROVIDER = "original_etp"
+_C.MODEL.MID360_SPARSE_DEPTH_CONFIG_PATH = "configs/mid360_sparse_depth_zero_shot.yaml"
+_C.MODEL.MID360_CONFIG_PATH = "configs/mid360_waypoint.yaml"
+_C.MODEL.MID360_V1_CONFIG_PATH = "configs/mid360_waypoint_v1.yaml"
 
 _C.MODEL.INSTRUCTION_ENCODER = CN()
 _C.MODEL.INSTRUCTION_ENCODER.sensor_uuid = "instruction"

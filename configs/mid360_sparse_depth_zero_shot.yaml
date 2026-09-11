@@ -1,0 +1,20 @@
+# Engineering approximation for zero-shot sensor-domain control.
+# This does NOT model the Livox MID360 non-repetitive scan physics.
+camera_height_m: 1.25
+horizontal_fov_degrees: 90.0
+policy_depth_minimum_m: 0.0
+policy_depth_maximum_m: 10.0
+source_pixel_stride: 1
+# These preserve camera z-depth support, NOT a 10 m Euclidean sphere.
+# The shared Euclidean filter receives the enclosing camera-frustum radius.
+minimum_range_m: 0.0
+maximum_range_m: 10.0
+# Preserve camera elevation coverage to isolate sparsity in this first control.
+vertical_fov_min_degrees: -90.0
+vertical_fov_max_degrees: 90.0
+azimuth_bin_degrees: 0.5
+elevation_bin_degrees: 0.5
+# Disabled: existing voxel filter averages points, synthesizing new returns.
+voxel_size_m: 0.0
+no_return_fill_normalized: 1.0
+# No randomness, completion, interpolation, dilation, learning or success tuning.

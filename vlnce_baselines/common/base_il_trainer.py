@@ -3,7 +3,6 @@ import jsonlines
 import os
 import sys
 import time
-import warnings
 from collections import defaultdict
 from typing import Dict, List
 
@@ -44,6 +43,7 @@ from vlnce_baselines.common.env_utils import (
     is_slurm_batch_job,
 )
 from vlnce_baselines.common.utils import *
+from vlnce_baselines.common.r2r_runtime import prepare_r2r_evaluation_environment
 
 from habitat_extensions.measures import NDTW
 from fastdtw import fastdtw
@@ -52,11 +52,6 @@ from ..utils import get_camera_orientations12
 from ..utils import (
     length2mask, dir_angle_feature, dir_angle_feature_with_ele,
 )
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    import tensorflow as tf  # noqa: F401
-
 
 class BaseVLNCETrainer(BaseILTrainer):
     r"""A base trainer for VLN-CE imitation learning."""
@@ -799,49 +794,7 @@ class BaseVLNCETrainer(BaseILTrainer):
         self.world_size = world_size
         self.local_rank = self.config.local_rank
 
-        self.config.defrost()
-        self.config.TASK_CONFIG.DATASET.ROLES = ["guide"]
-        self.config.TASK_CONFIG.TASK.MEASUREMENTS = ['POSITION', 'STEPS_TAKEN', 'COLLISIONS']
-        self.config.SIMULATOR_GPU_IDS = [self.config.SIMULATOR_GPU_IDS[self.config.local_rank]]
-
-        if 'HIGHTOLOW' in self.config.TASK_CONFIG.TASK.POSSIBLE_ACTIONS:
-            idx = self.config.TASK_CONFIG.TASK.POSSIBLE_ACTIONS.index('HIGHTOLOW')
-            self.config.TASK_CONFIG.TASK.POSSIBLE_ACTIONS[idx] = 'HIGHTOLOWEVAL'
-        self.config.TASK_CONFIG.DATASET.LANGUAGES = self.config.EVAL.LANGUAGES
-        self.config.TASK_CONFIG.DATASET.SPLIT = self.config.EVAL.SPLIT
-        self.config.TASK_CONFIG.TASK.NDTW.SPLIT = self.config.EVAL.SPLIT
-        self.config.TASK_CONFIG.TASK.SDTW.SPLIT = self.config.EVAL.SPLIT
-        self.config.use_pbar = not is_slurm_batch_job()
-        
-        # if choosing image
-        resize_config = self.config.RL.POLICY.OBS_TRANSFORMS.RESIZER_PER_SENSOR.SIZES
-        crop_config = self.config.RL.POLICY.OBS_TRANSFORMS.CENTER_CROPPER_PER_SENSOR.SENSOR_CROPS
-        config = self.config.TASK_CONFIG
-        camera_orientations = get_camera_orientations12()
-
-        # sensor_uuids = []
-        for sensor_type in ["RGB", "DEPTH"]:
-            resizer_size = dict(resize_config)[sensor_type.lower()]
-            cropper_size = dict(crop_config)[sensor_type.lower()]
-            sensor = getattr(config.SIMULATOR, f"{sensor_type}_SENSOR")
-
-            for action, orient in camera_orientations.items():
-                camera_template = f"{sensor_type}_{action}"
-                camera_config = deepcopy(sensor)
-                camera_config.ORIENTATION = camera_orientations[action]
-                camera_config.UUID = camera_template.lower()
-                # sensor_uuids.append(camera_config.UUID)
-                setattr(config.SIMULATOR, camera_template, camera_config)
-                config.SIMULATOR.AGENT_0.SENSORS.append(camera_template)
-                resize_config.append((camera_template.lower(), resizer_size))
-                crop_config.append((camera_template.lower(), cropper_size))
-
-        self.config.RL.POLICY.OBS_TRANSFORMS.RESIZER_PER_SENSOR.SIZES = resize_config
-        self.config.RL.POLICY.OBS_TRANSFORMS.CENTER_CROPPER_PER_SENSOR.SENSOR_CROPS = crop_config
-        self.config.TASK_CONFIG = config
-        self.config.SENSORS = config.SIMULATOR.AGENT_0.SENSORS
-        
-        self.config.freeze()
+        prepare_r2r_evaluation_environment(self.config)
         torch.cuda.set_device(self.device)
         if world_size > 1:
             distr.init_process_group(backend='nccl', init_method='env://')

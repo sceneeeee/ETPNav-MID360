@@ -13,7 +13,11 @@ __pycache__/
 
 /data
 /logs
+/outputs
 /pretrained
 /interact
 /pretrain_src/datasets
 /pretrain_src/img_features
+
+# Local, reproducible legacy dependencies (never vendor nested repositories)
+/.external

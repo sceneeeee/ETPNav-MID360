@@ -11,6 +11,7 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 import habitat_extensions  # noqa: F401
 import vlnce_baselines  # noqa: F401
 from vlnce_baselines.config.default import get_config
+from vlnce_baselines.common.r2r_runtime import initialize_runtime_config
 # from vlnce_baselines.nonlearning_agents import (
 #     evaluate_agent,
 #     nonlearning_inference,
@@ -76,8 +77,7 @@ def run_exp(exp_name: str, exp_config: str,
     if 'CMA' in config.MODEL.policy_name and 'r2r' in config.BASE_TASK_CONFIG_PATH:
         config.TASK_CONFIG.DATASET.DATA_PATH = 'data/datasets/R2R_VLNCE_v1-2_preprocessed/{split}/{split}.json.gz'
 
-    config.local_rank = local_rank
-    config.freeze()
+    initialize_runtime_config(config, local_rank)
     os.system("mkdir -p data/logs/running_log")
     logger.add_filehandler('data/logs/running_log/'+config.LOG_FILE)
 
