@@ -2,19 +2,57 @@
 .ftpconfig
 .vscode
 
-# Byte-compiled / optimized / DLL files
+# Local editor / OS state
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python / notebook state
 .ipynb_checkpoints/
 __pycache__/
 *.py[cod]
 *$py.class
 *.swp
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials.json
+secrets.json
+
+# Local project handoff / agent state (never commit)
+temp_report.md
+
+# Generated archives / figures (tracked assets remain tracked)
 *.png
 *.zip
+*.tar
+*.tar.gz
+*.tgz
 
+# Model checkpoints / training artifacts
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+
+# Data, logs, outputs, pretrained assets, caches
 /data
 /logs
 /outputs
 /pretrained
+/checkpoints
+/cache
+/caches
 /interact
 /pretrain_src/datasets
 /pretrain_src/img_features
