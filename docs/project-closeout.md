@@ -55,6 +55,19 @@ Habitat 中的 sparse depth 是由 dense depth 确定性构造的几何近似，
 | G-Min | 0.500 | 0.428 | 4.274 | 0.650 | 0.582 | 0.399 |
 | Sparse Depth Zero-shot | 0.000 | 0.000 | 9.108 | 0.000 | 0.281 | 0.000 |
 
+## 4. Portfolio 工程展示素材（历史证据后处理）
+
+为个人 Portfolio 准备了可追溯的展示素材，见 [Portfolio Evidence Pack](portfolio-evidence/README.md)：
+
+- episode 53 同一观测的 Original dense-depth vs MID360-like sparse-depth waypoint proposals；
+- G-Min 595 个候选经过 GraphMap 关联后的聚合审计；
+- 5 个 held-out static observations 的 depth encoder / waypoint classifier post-ReLU activity 对照；
+- Frozen-20 development panel 指标汇总。
+
+本轮只从已保存的实验报告与历史日志提取数据、整理 CSV 并生成 SVG；**没有重新启动 Habitat、重新加载 checkpoint、运行 navigation、训练或产生新实验数据**。原始的 matched dense/sparse depth 图像对未能从现有公开材料中恢复：历史演示文稿中的 Habitat dense-depth 截图与 Livox 官方扫描可视化并非同一视角，因此没有拼接成虚假的 matched pair。episode 53 候选图作为诚实替代，并明确标注它展示的是 proposer 输出，不是原始传感器图像。
+
+原始 `outputs/` 目录为历史本地 ignored artifacts，不在公开仓库；当前提交的 CSV 是图表使用的汇总证据，不等于恢复了原始 NPZ / JSON / telemetry 文件。
+
 ## 4. Stage 5 Learned Adapter：保留为未完成原型
 
 Stage 5 M0 / M1 形成了 adapter contract、单 pair smoke、feature cache / scene-level split / A1 training pipeline 代码，以及 static evaluator 分支和 CPU tests。但这条线没有完成可接受的端到端研究验收：
