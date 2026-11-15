@@ -1,14 +1,14 @@
 # ETPNav-MID360
 
-基于 ETPNav 的稀疏 LiDAR / MID360 视觉语言导航适配研究。
+<ins>**项目状态：已结项 / 停止推进（2026-11-16）。**</ins> 本仓库保留 ETPNav × MID360-inspired sparse-depth 的研究与工程实验记录；后续主线已转向 [Room-Sign-Guided Navigation](https://github.com/sceneeeee/room-sign-guided-navigation)。最终结项范围见 [docs/project-closeout.md](docs/project-closeout.md)。
 
-本项目关注一个核心问题：
+本项目曾关注一个核心问题：
 
 > 原本依赖稠密 RGB-D depth 的 ETPNav waypoint proposal，如何适配 MID360 一类稀疏 LiDAR 观测，同时尽量保持后续 GraphMap、语言/拓扑规划器和执行框架不变？
 
-当前工作以 Habitat / R2R-CE / Matterport3D 的受控实验为主，后续计划迁移到 Isaac Sim，并最终接入真实 MID360、FAST-LIO2 和机器人导航栈。
+历史工作主要基于 Habitat 的受控实验。Isaac Sim、真实 MID360、FAST-LIO2 和机器人导航栈仅为未执行的后续设想，不属于已交付成果。
 
-**当前阶段：Learned Sparse→Dense Feature Adapter。**
+**最终状态：** Geometry / sparse-depth failure analysis 已记录；Stage 5 Learned Sparse→Dense Adapter 仅保留未完成原型，未完成正式训练与 held-out 验证。
 
 ---
 
@@ -30,7 +30,7 @@ Perception
 
 ---
 
-## 2. 当前研究边界
+## 2. 最终研究边界与验证限制
 
 当前研究重点是 **waypoint interface adaptation**，不是重新训练整个 ETPNav。
 
@@ -55,7 +55,7 @@ Dense Depth → MID360-like sparse observation → adaptation
 - 不因为单个结果不好就同时修改 proposer、GraphMap、planner 和 executor；
 - frozen 20 episodes 只作为受控 development panel，不代表完整论文 benchmark；
 - Habitat 中的 MID360-like 输入目前仍是从 dense Depth 构造的确定性稀疏几何近似，并不等同于真实 Livox 扫描物理；
-- Isaac Sim 阶段再切换到原生 LiDAR sensor simulation，并逐步加入 localization error 和真实机器人约束。
+- Isaac Sim 原生 LiDAR、定位误差、真实 MID360 和机器人约束均未实现；相关内容仅保留在设计文档。
 
 ---
 
@@ -82,21 +82,18 @@ Original ETPNav baseline
 │ Geometry V1 exploration → scope drift / 暂缓            │
 └─────────────────────────────────────────────────────────┘
   ↓
-重新考虑保留 Original learned waypoint prior
-  ↓
 MID360-like Sparse Depth Zero-shot
   ↓
 Waypoint Predictor Failure Forensics
   ↓
 Fixed Feature Alignment
   ↓
-Learned Sparse→Dense Adapter   ← 当前
+Stage 5 Learned Sparse→Dense Adapter M0/M1 prototype
+  （未合并、未完成正式训练与 held-out validation）
   ↓
-Navigation Validation
-  ↓
-Full Benchmark / Geometry Comparison
-  ↓
-Isaac Sim → FAST-LIO2 → MID360 实机
+2026-11：项目停止推进，转向 Room-Sign Navigation
+
+Isaac Sim / FAST-LIO2 / MID360 实机：未执行
 ```
 
 ---
@@ -395,13 +392,9 @@ waypoint radial diversity 未恢复
 
 ---
 
-## 9. 当前阶段：Learned Sparse→Dense Feature Adapter
+## 9. Stage 5 Learned Adapter：未完成的实验原型
 
-当前开发分支：
-
-```text
-mid360-sparse-depth-learned-adapter
-```
+Stage 5 在独立分支上保留了 M0 adapter contract、single-pair smoke、M1 feature cache / dataset / A1 training pipeline 代码和 static evaluator 原型。它们不是 `main` 上已完成、已泛化的最终交付。
 
 下一步不直接 fine-tune 整个 ETPNav，而是先验证一个轻量非线性 adapter：
 
@@ -418,18 +411,18 @@ Sparse Depth                   │
 → Frozen Original Waypoint Predictor
 ```
 
-第一阶段要回答的不是“SR 能不能立刻恢复”，而是：
+该路线原本计划回答以下问题，但项目终止前没有完成正式验证：
 
 1. `F_adapt` 是否更接近 dense feature domain；
 2. `vis_classifier` activation 是否从 0 恢复；
 3. waypoint angular / radial diversity 是否恢复；
 4. static mechanism test 通过后，再进入 frozen-20 navigation evaluation。
 
-如果 adapter 有效，再讨论是否需要 partial fine-tuning；如果无效，再重新评估 waypoint front-end adaptation 的位置和目标函数。
+PR #3 未合并；审查还记录了 collector 临时目录冲突、reset episode/scene identity guard 和 provenance contract 等 host execution 前阻塞。正式 A1 checkpoint、held-out-5 gate 与 frozen-20 navigation 均未完成。详见 [项目结项报告](project-closeout.md)。
 
 ---
 
-## 10. 后续计划
+## 10. 未完成且不纳入本次交付的计划
 
 ```text
 Stage A  Learned Adapter static validation
@@ -463,7 +456,7 @@ MID360 geometry
 
 ---
 
-## 11. Branch 结构
+## 11. 历史 Branch 结构（保留，不再推进）
 
 ```text
 main
@@ -476,7 +469,7 @@ main
 │   └── fixed feature alignment negative result
 │
 └── mid360-sparse-depth-learned-adapter
-    └── 当前开发分支
+    └── Stage 5 M0/M1 未完成原型
 
 etp-mid360
 └── 早期 MID360 / ETPNav base 分支
@@ -485,11 +478,11 @@ isaac-integration
 └── Isaac integration / geometry development history
 ```
 
-`main` 作为默认分支，保留已经验证、可以稳定解释的项目状态；新实验在独立 feature branch 中推进。
+`main` 保留可解释的实验结果与负结果。历史 feature branches 保留作研究记录，不再继续开发或删除。PR #3 已关闭不合并，Issues #1/#2 已按路线终止关闭。
 
 ---
 
-## 12. 相关文档
+## 12. 相关文档与结项
 
 - [ETPNav baseline architecture](docs/etp_baseline_architecture.md)
 - [MID360 sparse-depth zero-shot](docs/mid360_sparse_depth_zero_shot.md)
@@ -498,6 +491,7 @@ isaac-integration
 - [Isaac integration audit](docs/isaac_integration_audit.md)
 - [Renderer bootstrap](docs/renderer_bootstrap.md)
 - [Setup log](docs/setup_log.md)
+- [Project closeout](docs/project-closeout.md)
 
 大量运行产物、checkpoint、raw logs 和正式 evaluation evidence 默认不作为 README 内容；README 只记录会影响研究决策的结果。
 
