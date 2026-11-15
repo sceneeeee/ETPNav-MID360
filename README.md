@@ -111,6 +111,17 @@ Isaac Sim / FAST-LIO2 / MID360 实机：未执行
 | G-Min | 0.500 | 0.428 | 4.274 | 0.650 | 0.582 | 0.399 |
 | **Sparse Depth Zero-shot** | **0.000** | **0.000** | **9.108** | **0.000** | **0.281** | **0.000** |
 
+### Portfolio-ready evidence
+
+本仓库新增了一个基于历史实验记录整理的可公开展示素材包：[Portfolio Evidence Pack](docs/portfolio-evidence/README.md)。
+
+- [Same-observation waypoint proposal comparison](docs/portfolio-evidence/assets/first-decision-proposals.svg)：episode 53 同一观测下 dense / sparse 两种输入产生的第一步候选对比。注意这是候选输出图，不是原始 depth 图像。
+- [GraphMap proposal-to-action audit](docs/portfolio-evidence/assets/graphmap-association-audit.svg)：595 个 G-Min 候选经 GraphMap 关联后的聚合去向。
+- [Predictor activation collapse](docs/portfolio-evidence/assets/predictor-activation-collapse.svg)：5 个 held-out static observations 的 encoder / classifier ReLU 激活对照。
+- [Frozen-20 development results](docs/portfolio-evidence/assets/frozen20-development-results.svg)：受控开发集的指标汇总，不是正式 benchmark。
+
+这些 SVG 是对既有报告数值的后处理，不是本次重新运行 Habitat 或模型得到的新实验。原始输出目录曾保存在本地 ignored `outputs/`，未随仓库公开。
+
 这组结果形成了两条重要结论：
 
 1. 显式几何路线并不是完全不可行，但目前所有 geometry variants 都没有恢复 Original ETPNav 的成功率；
@@ -493,7 +504,7 @@ isaac-integration
 - [Setup log](docs/setup_log.md)
 - [Project closeout](docs/project-closeout.md)
 
-大量运行产物、checkpoint、raw logs 和正式 evaluation evidence 默认不作为 README 内容；README 只记录会影响研究决策的结果。
+大量运行产物、checkpoint、raw logs 和正式 evaluation evidence 默认不作为 README 内容；精选的可公开展示图及其来源、CSV 数据和证据边界集中放在 [docs/portfolio-evidence/](docs/portfolio-evidence/README.md)。
 
 ---
 
